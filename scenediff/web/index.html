@@ -9,7 +9,7 @@
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="#" aria-label="SceneDiff home"><svg width="29" height="29" viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M16 7 6 25m10-18 10 18M6 25h20" stroke="currentColor" stroke-width="2"/><rect x="11" y="2" width="10" height="10" rx="3" fill="currentColor"/><rect x="1" y="20" width="10" height="10" rx="3" fill="currentColor"/><rect x="21" y="20" width="10" height="10" rx="3" fill="currentColor"/></svg><strong>SceneDiff</strong><span class="version">0.1</span></a>
+    <a class="brand" href="#" aria-label="SceneDiff home"><svg width="29" height="29" viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M16 7 6 25m10-18 10 18M6 25h20" stroke="currentColor" stroke-width="2"/><rect x="11" y="2" width="10" height="10" rx="3" fill="currentColor"/><rect x="1" y="20" width="10" height="10" rx="3" fill="currentColor"/><rect x="21" y="20" width="10" height="10" rx="3" fill="currentColor"/></svg><strong>SceneDiff</strong><span class="version">0.2</span></a>
     <span class="divider"></span><span id="project-name">Godot scene review</span>
     <span class="spacer"></span><span class="local-label"><i></i> Runs locally</span>
     <button id="save-report" class="quiet">Save report</button><button id="new-comparison" class="primary">＋ New comparison</button>
@@ -39,13 +39,15 @@
         <span class="spacer"></span><label class="toggle" id="unchanged-toggle"><input id="show-unchanged" type="checkbox"> Show unchanged</label>
       </div>
       <div id="comparison" class="comparison"></div>
+      <div id="merge-controls" class="resolution"></div>
       <div id="resolution" class="resolution"></div>
     </section>
     <aside class="inspector" aria-label="Review and impact">
+      <section class="panel" id="merge-downloads"><span class="eyebrow">MERGED FILE</span><p class="small muted" id="merge-status">Apply a change, then download the updated scene.</p><button id="download-a" class="wide" disabled>Download merged A</button><button id="download-b" class="wide" disabled>Download merged B</button><button id="undo-merge" class="wide" disabled>Undo last apply</button><div id="merge-error" class="form-error" role="alert"></div></section>
       <section class="panel"><span class="eyebrow">REVIEW PROGRESS</span><div id="progress-title" class="progress-title"></div><div class="progress-track"><div id="progress-fill"></div></div><p class="muted small" id="progress-description"></p><button id="next-conflict" class="wide">Next unresolved conflict →</button></section>
       <section class="panel"><span class="eyebrow">CHANGE IMPACT</span><div id="impact"></div></section>
       <section class="panel warnings-panel"><span class="eyebrow">REVIEW NOTES</span><div id="warnings"></div></section>
-      <section class="review-note"><span>◇</span><p>Review confidently. Decisions are saved in a review plan. Your project files stay untouched.</p></section>
+      <section class="review-note"><span>◇</span><p>Apply selected changes, download the merged file, and open it in Godot to check the result. Review-plan choices are saved separately.</p></section>
     </aside>
   </main>
   <footer><span class="status-dot"></span><span id="footer-status">Ready to compare</span><span class="spacer"></span><span class="shortcut-hint">Select a property · A / B to choose</span><button id="export-plan" class="primary">Export review plan ↗</button></footer>
@@ -63,3 +65,4 @@
   <script>/*__APP__*/</script>
 </body>
 </html>
+

@@ -115,6 +115,27 @@ class ServerAndReportTests(unittest.TestCase):
         self.assertEqual(status,200)
         self.assertFalse(json.loads(response)['three_way'])
 
+    def test_merge_api_returns_updated_scene_and_rejects_invalid_edits(self):
+        _,html=self.request()
+        boot=json.loads(re.search(r'<script type="application/json" id="boot">(.*?)</script>',html,re.S)[1])
+        headers={'X-SceneDiff-Token':boot['token'],'Content-Type':'application/json'}
+        scene='[gd_scene format=3]\n[node name="World" type="Node"]\nx = 1\ny = 1'
+        request={'sources':[None,scene.replace('x = 1','x = 2'),scene.replace('y = 1','y = 3')],
+                 'source':1,'entity':'node:.','property':'x','name':'a.tscn'}
+        self.assertEqual(self.request('/api/merge','POST',json.dumps(request))[0],403)
+        status,response=self.request('/api/merge','POST',json.dumps(request),headers)
+        self.assertEqual(status,200)
+        merged=json.loads(response)
+        self.assertEqual(merged['merge']['target'],2)
+        self.assertIn('x = 2',merged['files'][0]['sources'][2])
+        self.assertIn('y = 3',merged['files'][0]['sources'][2])
+        self.assertEqual(merged['files'][0]['sources'][1],request['sources'][1])
+        for field,value in [('source',0),('source',1.0),('source',[]),('sources','invalid'),('property','@name'),('entity',None),('name','file.gd')]:
+            with self.subTest(field=field,value=value):
+                status,response=self.request('/api/merge','POST',json.dumps({**request,field:value}),headers)
+                self.assertEqual(status,400)
+                self.assertIn('error',json.loads(response))
+
     def test_rejects_cross_origin_and_missing_token(self):
         self.assertEqual(self.request('/api/files','POST','{}')[0],403)
         self.assertEqual(self.request(headers={'Origin':'https://evil.example'})[0],403)
@@ -136,3 +157,4 @@ class ServerAndReportTests(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+

@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from .gitrepo import compare_git
 from .report import demo, render
 from .semantic import compare_file, report
+from .merge import merge_selection
 
 MAX_REQUEST = 32 * 1024 * 1024
 
@@ -67,6 +68,17 @@ def create_server(port=0, initial=None):
                         if data.get(key) is not None and not isinstance(data[key], str):
                             raise ValueError(f"Invalid {key}")
                     payload = compare_git(data["repo"], data["left"], data["right"], data.get("base") or None, data.get("path") or None)
+                elif self.path == "/api/merge":
+                    sources = data.get("sources")
+                    source = data.get("source")
+                    name = data.get("name", "scene.tscn")
+                    text, warnings, imports = merge_selection(sources, source, data.get("entity"), data.get("property"), name, data.get("imports"))
+                    merged = list(sources)
+                    merged[3 - source] = text
+                    three = merged[0] is not None
+                    item = compare_file(name, *merged, three_way=three)
+                    payload = report([item], ["Base", "A", "B"], three_way=three, context={"source": "files"})
+                    payload["merge"] = {"target": 3 - source, "warnings": warnings, "imports": imports}
                 elif self.path == "/api/files":
                     for key in ("left", "right"):
                         if not isinstance(data.get(key), str):
@@ -87,3 +99,4 @@ def create_server(port=0, initial=None):
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     server.daemon_threads = True
     return server
+

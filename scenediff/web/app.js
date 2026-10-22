@@ -5,6 +5,7 @@
   let fileIndex = 0, entityKey = null, tab = "properties", selectedProperty = null;
   let query = "", conflictsOnly = false, showUnchanged = false, mode = "git", rawMode = "diff";
   let decisions = data?.review?.decisions || {};
+  let mergeHistory = [], merging = false, mergeError = "";
   const $ = id => document.getElementById(id);
   const escape = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"}[char]));
   const labels = {unchanged:"Unchanged", left:"A changed", right:"B changed", both:"Both agree", combined:"Independent edits", conflict:"Conflict", added:"Added", removed:"Removed", modified:"Modified"};
@@ -134,7 +135,7 @@
     const key = decisionKey(target.f,target.e,target.prop);
     const decision = decisions[key];
     const title = target.prop === "$file" ? "Review file" : target.prop === "$structure" ? "Review structural conflict" : `Review: ${target.prop.replace(/^@/, "")}`;
-    $("resolution").innerHTML = `<div class="resolution-card"><h3>${escape(title)} ${decision ? badge("chosen","Decision recorded") : ""}</h3><p>Choose a version for the review plan. Applying a scene merge requires a separate edit and validation in Godot.</p><div class="choice-list">${[1,2].map(i => `<button class="choice ${decision?.choice === ["base","left","right"][i] ? "selected" : ""}" data-choice="${["base","left","right"][i]}"><span class="radio"></span><span>Use ${i === 1 ? "A" : "B"}<small>${escape(target.prop === "$file" ? target.values[i] === null ? "Delete file" : "Whole file version" : concise(target.values[i]))}</small></span></button>`).join("")}</div>${target.prop.startsWith("$") ? "" : `<div class="custom-choice"><input id="custom-value" aria-label="Custom Godot property value" placeholder='Custom value, e.g. Vector2(100, 50)' value="${escape(decision?.choice === "custom" ? decision.value : "")}"><button id="choose-custom">Use custom</button></div>`}<button class="clear-choice" id="clear-choice">${decision ? "Clear decision" : "Leave unresolved"}</button>${target.e?.structural_conflict && target.prop !== "$structure" ? '<button id="review-structure" class="quiet">Review structure →</button>' : ""}</div>`;
+    $("resolution").innerHTML = `<div class="resolution-card"><h3>${escape(title)} ${decision ? badge("chosen","Decision recorded") : ""}</h3><p>Choose a version for the review plan. To change the scene file, use the Apply buttons above and download the merged result.</p><div class="choice-list">${[1,2].map(i => `<button class="choice ${decision?.choice === ["base","left","right"][i] ? "selected" : ""}" data-choice="${["base","left","right"][i]}"><span class="radio"></span><span>Use ${i === 1 ? "A" : "B"}<small>${escape(target.prop === "$file" ? target.values[i] === null ? "Delete file" : "Whole file version" : concise(target.values[i]))}</small></span></button>`).join("")}</div>${target.prop.startsWith("$") ? "" : `<div class="custom-choice"><input id="custom-value" aria-label="Custom Godot property value" placeholder='Custom value, e.g. Vector2(100, 50)' value="${escape(decision?.choice === "custom" ? decision.value : "")}"><button id="choose-custom">Use custom</button></div>`}<button class="clear-choice" id="clear-choice">${decision ? "Clear decision" : "Leave unresolved"}</button>${target.e?.structural_conflict && target.prop !== "$structure" ? '<button id="review-structure" class="quiet">Review structure →</button>' : ""}</div>`;
     $("resolution").querySelectorAll("[data-choice]").forEach(button => button.onclick = () => choose(button.dataset.choice));
     if ($("choose-custom")) $("choose-custom").onclick = () => {
       const value = $("custom-value").value;
@@ -167,7 +168,8 @@
     if (f.referenced_by?.length) impact += `<div class="impact-item"><b>REFERENCED BY · BRANCH B</b>${f.referenced_by.map(p => `<code>${escape(p)}</code>`).join("<br>")}</div>`;
     if (!e?.used_by.some(users => users.length) && !f.referenced_by?.length) impact += '<p class="small muted">Inspect the serialized properties and raw source to understand the scope of this change.</p>';
     $("impact").innerHTML = impact;
-    const warnings = [...f.warnings,...(e?.notes || [])];
+    const warnings = [...f.warnings,...(f.merge_warnings || []),...(e?.notes || [])];
+    if (data.context.merge_preview && data.context.source === "git") warnings.push("Git commit IDs identify the original snapshots. Validate merged files and their dependencies in your target project.");
     if (e?.kind === "order") warnings.push("Child order can affect UI layout and processing. Review the complete order when both branches add children.");
     if (e?.rows.some(row => row.property === "@instance")) warnings.push("Inherited values and runtime behavior are not expanded here.");
     $("warnings").innerHTML = warnings.map(w => `<div class="warning">${escape(w)}</div>`).join("") || '<p class="small muted">No parser or reference warnings for this file. Runtime behavior has not been validated in Godot.</p>';
@@ -178,7 +180,7 @@
     $("project-name").textContent = data.context.repository || "Local comparison";
     $("base-label").textContent = data.three_way ? data.labels[0] : "Not provided";
     $("a-label").textContent = data.labels[1]; $("b-label").textContent = data.labels[2];
-    $("source-badge").textContent = data.context.source === "demo" ? "EXAMPLE PROJECT" : data.context.source === "git" ? "COMMITTED SNAPSHOTS" : "LOCAL FILES";
+    $("source-badge").textContent = data.context.merge_preview ? "MERGE PREVIEW" : data.context.source === "demo" ? "EXAMPLE PROJECT" : data.context.source === "git" ? "COMMITTED SNAPSHOTS" : "LOCAL FILES";
     $("new-comparison").textContent = boot.live ? "＋ New comparison" : "Open local app";
     renderSidebar();
     const f = file(), e = entity();
@@ -200,16 +202,92 @@
     });
     $("comparison").querySelectorAll("[data-select]").forEach(button => button.onclick = () => selectEntity(button.dataset.select));
     $("comparison").querySelectorAll("[data-raw]").forEach(button => button.onclick = () => { rawMode = button.dataset.raw; render(); });
-    renderResolution(); renderInspector();
+    renderMerge(); renderResolution(); renderInspector();
   }
   function download(name,contents,type) {
     const url = URL.createObjectURL(new Blob([contents],{type}));
     const anchor = document.createElement("a"); anchor.href=url; anchor.download=name; anchor.click();
     setTimeout(() => URL.revokeObjectURL(url),1000);
   }
+  function renderMerge() {
+    const f = file(), e = entity();
+    const supported = f && ["scene", "resource"].includes(f.kind);
+    const row = e?.rows.find(r => r.property === selectedProperty);
+    const protectedProps = {node:["@name","@parent","@unique_id","@type","@instance"], gd_scene:["@format","@uid"], gd_resource:["@format","@uid","@type"]};
+    const canProperty = row && e.exists[1] && e.exists[2] && !(protectedProps[e.kind] || []).includes(row.property);
+    const canEntity = e && !["gd_scene","gd_resource"].includes(e.kind);
+    const buttons = scope => [1,2].map(source => {
+      const target = 3-source;
+      const disabled = merging || f.sources[target] === null || (scope === "property" && !canProperty) || (scope === "entity" && (!canEntity || (e.kind === "node" && e.path === "." && !e.exists[source])));
+      return `<button data-apply="${source}" data-scope="${scope}" ${disabled ? "disabled" : ""}>Apply ${source === 1 ? "A → B" : "B → A"}</button>`;
+    }).join("");
+    let html = "";
+    if (supported && boot.live && e) {
+      html = `<div class="resolution-card"><h3>Apply changes to a scene</h3><p>Start with the target version and copy only what you select. Download the result when you are ready.</p>`;
+      if (row) html += `<div class="merge-scope">Selected property: <strong>${escape(row.property.replace(/^@/,""))}</strong></div><div class="merge-actions">${buttons("property")}</div>`;
+      if (canEntity) html += `<div class="merge-scope">${e.kind === "node" ? "Whole node and children" : "Whole " + escape(kindLabels[e.kind] || e.kind)}</div><div class="merge-actions">${buttons("entity")}</div><p>${e.kind === "node" ? "Replaces this target subtree, including its signal connections, with the source subtree. An absent source removes the target subtree." : "Copies the selected item. An absent source removes it when no references remain."}</p>`;
+      if (["sub_resource","ext_resource"].includes(e.kind)) html += '<p>Editing this resource affects every node that references it in the target.</p>';
+      html += '</div>';
+    } else if (supported && !boot.live) {
+      html = '<div class="inline-note">This saved report can download existing merged results. Run “python -m scenediff” to apply more changes.</div>';
+    }
+    $("merge-controls").innerHTML = html;
+    $("merge-controls").querySelectorAll("[data-apply]").forEach(button => button.onclick = () => applyMerge(Number(button.dataset.apply), button.dataset.scope));
+    $("merge-error").textContent = mergeError;
+    $("merge-status").textContent = merging ? "Applying change…" : f?.merged_sides?.length ? "The selected file has a merged preview. Download it and validate it in Godot. Referenced asset files must be present in your project." : "Apply a change, then download the updated scene.";
+    $("download-a").disabled = merging || !f?.merged_sides?.includes(1);
+    $("download-b").disabled = merging || !f?.merged_sides?.includes(2);
+    $("undo-merge").disabled = merging || !mergeHistory.length;
+    $("new-comparison").disabled = merging;
+    $("save-report").disabled = merging;
+  }
+  async function applyMerge(source, scope) {
+    if (merging) return;
+    const index = fileIndex, f = file(), e = entity();
+    if (!f || !e || !boot.live) return;
+    const property = scope === "property" ? selectedProperty : null;
+    const previous = {data, decisions:{...decisions}, index, entityKey, selectedProperty};
+    merging = true; mergeError = ""; renderMerge();
+    try {
+      const response = await fetch('/api/merge', {method:'POST', headers:{'Content-Type':'application/json','X-SceneDiff-Token':boot.token}, body:JSON.stringify({name:f.path, sources:f.sources, source, entity:e.key, property, imports:f.merge_imports?.[source] || []})});
+      const result = await response.json();
+      if (!response.ok) throw Error(result.error || 'Merge failed');
+      const updated = result.files[0];
+      updated.merge_imports = {...f.merge_imports, [source]:result.merge.imports};
+      updated.merged_sides = [...new Set([...(f.merged_sides || []),result.merge.target])];
+      updated.merge_warnings = [...new Set([...(f.merge_warnings || []),...result.merge.warnings])];
+      const files = data.files.map((item,i) => i === index ? updated : item);
+      mergeHistory.push(previous);
+      if (mergeHistory.length > 20) mergeHistory.shift();
+      data = {...data, id:'merge-' + result.id, files, context:{...data.context, merge_preview:true},
+        applied_changes:[...(data.applied_changes || []), {file:f.path, entity:e.key, property, source, target:result.merge.target}],
+        summary:{files:files.length, changed_files:files.filter(f => f.status !== 'unchanged').length,
+          conflicts:files.reduce((n,f) => n + (f.entities.length ? f.entities.filter(e => e.status === 'conflict').length : Number(f.status === 'conflict')),0), warnings:files.reduce((n,f) => n+f.warnings.length,0)}};
+      decisions = Object.fromEntries(Object.entries(decisions).filter(([,d]) => d.file !== f.path));
+      fileIndex=index; entityKey=updated.entities.some(item => item.key === e.key) ? e.key : updated.entities[0]?.key;
+      selectedProperty=null; tab='properties'; conflictsOnly=false; $("conflicts-only").checked=false;
+      toast(`Applied ${source === 1 ? 'A → B' : 'B → A'}. Download merged ${source === 1 ? 'B' : 'A'} to save it.`);
+    } catch (error) { mergeError=error.message; }
+    finally { merging=false; render(); }
+  }
+  function downloadMerged(side) {
+    const f=file();
+    if (!f?.merged_sides?.includes(side)) return;
+    const name=f.path.split(/[\\/]/).pop().replace(/(\.(?:tscn|tres))$/i, `.merged-${side === 1 ? 'A' : 'B'}$1`);
+    download(name,f.sources[side],'text/plain;charset=utf-8');
+  }
+  $("download-a").onclick=() => downloadMerged(1);
+  $("download-b").onclick=() => downloadMerged(2);
+  $("undo-merge").onclick=() => {
+    if (merging || !mergeHistory.length) return;
+    const previous=mergeHistory.pop();
+    data=previous.data; decisions=previous.decisions; fileIndex=previous.index; entityKey=previous.entityKey; selectedProperty=previous.selectedProperty;
+    mergeError=""; render(); toast('Last apply undone.');
+  };
   function reviewPlan() {
     return {format:"scenediff-review-plan",version:1,report_id:data.id,created_at:new Date().toISOString(),labels:data.labels,context:data.context,
-      note:"Review decisions only. No scene files have been merged or validated in Godot. Custom values are not syntax-checked.",
+      note:"Review-plan decisions do not apply edits. Explicit Apply operations update the downloadable preview separately. Godot runtime validation and custom-value validation are not performed.",
+      applied_changes:data.applied_changes || [],
       decisions:Object.values(decisions),unresolved:conflicts().filter(c => !decisions[c.key]).map(c => ({file:c.f.path,entity:c.e?.key || null,property:c.prop}))};
   }
   $("export-plan").onclick = () => download("scenediff-review.json",JSON.stringify(reviewPlan(),null,2),"application/json");
@@ -241,6 +319,7 @@
     $("form-error").textContent="";
   });
   $("new-comparison").onclick = () => {
+    if (merging) return;
     if (!boot.live) { toast("Run “scenediff serve” on your computer to start a new comparison."); return; }
     $("compare-dialog").showModal();
   };
@@ -260,7 +339,7 @@
       }
       const response=await fetch(`/api/${mode}`,{method:"POST",headers:{"Content-Type":"application/json","X-SceneDiff-Token":boot.token},body:JSON.stringify(payload)});
       const result=await response.json(); if (!response.ok) throw Error(result.error || "Comparison failed");
-      data=result; decisions={}; query=""; $("search").value=""; conflictsOnly=false; $("conflicts-only").checked=false;
+      data=result; decisions={}; mergeHistory=[]; mergeError=""; query=""; $("search").value=""; conflictsOnly=false; $("conflicts-only").checked=false;
       selectFile(0); $("compare-dialog").close();
     } catch (error) { $("form-error").textContent=error.message; }
     finally { $("submit-compare").disabled=false; $("submit-compare").textContent="Compare changes →"; }
@@ -272,3 +351,4 @@
   });
   selectFile(data?.files.findIndex(f => f.status === "conflict") >= 0 ? data.files.findIndex(f => f.status === "conflict") : 0);
 })();
+

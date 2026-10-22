@@ -44,4 +44,7 @@ jobs:
         if: always()
         with:
           name: browser-screenshot
-          path: /tmp/scenediff-ui.png
+          path: |
+            /tmp/scenediff-ui.png
+            /tmp/scenediff-merge.png
+
