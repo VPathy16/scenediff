@@ -41,7 +41,7 @@
   function selectFile(index) {
     fileIndex = index;
     const f = file();
-    entityKey = f?.entities.find(e => e.status === "conflict")?.key || f?.entities.find(e => e.status !== "unchanged")?.key || f?.entities[0]?.key || null;
+    entityKey = f?.entities.find(e => e.status === "conflict")?.key || f?.entities.find(e => e.status !== "unchanged")?.key || f?.entities.find(e => e.kind === "node")?.key || f?.entities[0]?.key || null;
     selectedProperty = null;
     tab = f?.entities.length ? "properties" : "raw";
     render();
