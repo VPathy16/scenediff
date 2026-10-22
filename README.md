@@ -4,7 +4,7 @@
 
 Compare two files or two Git branches. Explore the scene tree, inspect properties side by side, see shared material references, and record A/B/custom decisions for conflicts.
 
-**Version 0.1 is a working review tool.** It exports portable HTML reports and JSON review plans. It does **not** write merged scene files, execute Godot, or render game previews. A review decision is not an applied or validated merge.
+**Version 0.2 adds selective scene merging.** Copy properties, nodes and their children, resources, signals, and child order between A and B, then download the merged `.tscn` or `.tres` file. It also exports portable HTML reports and JSON review plans. Review-plan choices remain separate from Apply operations. Godot execution and game previews are not included.
 
 ## Start in one command
 
@@ -35,7 +35,7 @@ scenediff
 ### Optional desktop window
 
 ```bash
-python -m pip install '.[desktop]'
+python -m pip install ".[desktop]"
 scenediff serve --desktop
 ```
 
@@ -81,6 +81,23 @@ Without a base, this is a two-way comparison: differences are not labeled confli
 
 The conflict summary counts affected **entities/files**; the progress panel counts individual **decisions**. Structural conflicts require both a structural decision and decisions for any conflicting properties. Recorded choices can still be mutually inconsistent; validate them when implementing a merge.
 
+## Apply changes and download a merged scene
+
+1. Run `python -m scenediff` and open the local browser page.
+2. Choose **New comparison → Local files**, select versions A and B of the same `.tscn` or `.tres` file, and click **Compare changes**. A common base is optional. Merging also works on scene files in a Git comparison.
+3. Select a node or resource, then a property. Under **Selected property**, click **Apply A → B** to copy its A value into B, or **Apply B → A** for the reverse direction. Other target properties are retained. Copying an absent value removes that override.
+4. To add, remove, or replace an entire node, use **Whole node and children**. This copies the source subtree and its associated signal connections. Target-only descendants in that subtree are removed. If the source node is absent, the target subtree is removed.
+5. Repeat for other changes. **Undo last apply** restores the previous preview (up to 20 operations).
+6. Click **Download merged B** or **Download merged A**. The selected file downloads as, for example, `level.merged-B.tscn`. Place it in the target Godot project, check its dependencies and behavior in Godot, then use it to replace the intended scene when ready. The download keeps the target file UID, so it is intended as a replacement for that scene rather than a second permanent scene with the same UID.
+
+Apply updates the in-memory preview. It does not overwrite source files, change Git branches, or apply every recorded review-plan decision. Download each modified file before closing the app. A saved HTML report retains merged previews for download, but further Apply operations require the live app. Undo history is only kept in the live session.
+
+Embedded resource dependencies are copied recursively. Conflicting resource IDs are remapped, and matching unchanged definitions are reused. Copying a resource-valued property can create a separate resource when the source definition differs; other target users keep their existing definition. Applying changes directly to a resource definition affects all its users in the target.
+
+External resource declarations (scripts, textures, other scenes) are copied with their references; the asset files themselves are not bundled. They must exist at the declared `res://` paths in the target project. Whole-file additions, script/text merges, custom-value merging, and automatic application of review plans are not part of this feature.
+
+The writer checks serialized structure, resource references, and explicit node and signal paths. It rejects missing parents, deletion of referenced resources, cyclic embedded resources, unknown section types, and mixed Godot formats. Child order can be applied after both sides contain the same children. Instanced/inherited defaults, NodePath properties, animations, and runtime behavior still require validation in Godot. Untouched sections retain their text; changed sections are rewritten and may lose comments or formatting.
+
 ## Git difftool integration
 
 After installing `scenediff` into an environment on your PATH, run these commands from your Godot repository (POSIX shell or Git Bash):
@@ -107,7 +124,7 @@ scenediff git alice/layout bob/lighting --repo /path/to/project --json --check
 
 ## Comparison rules and limits
 
-| Case | Version 0.1 behavior |
+| Case | Version 0.2 comparison behavior |
 | --- | --- |
 | Different properties changed on each branch | Marked independent edits |
 | Same property changed differently | Property conflict |
@@ -129,7 +146,7 @@ scenediff git alice/layout bob/lighting --repo /path/to/project --json --check
 
 Godot Variant expressions are tokenized, never evaluated. Whitespace outside strings and resource ID churn can be ignored; dictionary/array order, numeric spelling, and serialized property differences remain visible. No scripts, shaders, editor plugins, or project code are executed.
 
-Different Godot versions can produce different serialized defaults and formats. Compare work produced by the same Godot version where possible. NodePath targets, animation tracks, shader uniform compatibility, script export renames, runtime references, and behavior interactions are **not fully validated** in this release. Godot-assisted validation, visual scene previews, and an actual merge writer are future work.
+Different Godot versions can produce different serialized defaults and formats. Compare work produced by the same Godot version where possible. NodePath targets, animation tracks, shader uniform compatibility, script export renames, runtime references, and behavior interactions are **not fully validated** in this release. Godot-assisted validation and visual scene previews are future work; selective serialized merging is available through the live app.
 
 Git mode reads up to 8 MiB per text blob; larger assets are shown by object identity. Total loaded content is limited to 64 MiB; use `--path` for larger comparisons. Local file comparisons accept up to 8 MiB per file.
 
@@ -148,8 +165,9 @@ python -m playwright install chromium
 python tests/browser_smoke.py
 ```
 
-The test suite covers nested Variant expressions, escaped strings, resource ID churn, material sharing, additions, property/structural conflicts, child order, malformed input, Git merge bases, dependency checks, source-safe report export, and the local API. GitHub Actions runs tests on Linux and Windows, plus a Chromium UI check on Linux.
+The test suite covers nested Variant expressions, escaped strings, resource ID churn, material sharing, additions, property/structural conflicts, child order, malformed input, Git merge bases, dependency checks, source-safe report export, the local API, selective merging, resource remapping, and merged downloads. GitHub Actions runs tests on Linux and Windows, plus a Chromium UI check on Linux.
 
-Architecture: `parser.py` reads sections; `semantic.py` builds comparable entities; `gitrepo.py` reads commit snapshots; `server.py` serves a local UI; `report.py` embeds portable reports; `web/` provides the interface without a build step.
+Architecture: `merge.py` copies selected changes and serializes merged downloads; `parser.py` reads sections; `semantic.py` builds comparable entities; `gitrepo.py` reads commit snapshots; `server.py` serves a local UI; `report.py` embeds portable reports; `web/` provides the interface without a build step.
 
 MIT licensed. Independent community tool; not affiliated with the Godot project.
+
