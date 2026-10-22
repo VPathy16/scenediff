@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>SceneDiff — Godot scene review</title>
+  <style>/*__STYLE__*/</style>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#" aria-label="SceneDiff home"><svg width="29" height="29" viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M16 7 6 25m10-18 10 18M6 25h20" stroke="currentColor" stroke-width="2"/><rect x="11" y="2" width="10" height="10" rx="3" fill="currentColor"/><rect x="1" y="20" width="10" height="10" rx="3" fill="currentColor"/><rect x="21" y="20" width="10" height="10" rx="3" fill="currentColor"/></svg><strong>SceneDiff</strong><span class="version">0.1</span></a>
+    <span class="divider"></span><span id="project-name">Godot scene review</span>
+    <span class="spacer"></span><span class="local-label"><i></i> Runs locally</span>
+    <button id="save-report" class="quiet">Save report</button><button id="new-comparison" class="primary">＋ New comparison</button>
+  </header>
+  <section class="branchbar" aria-label="Compared versions">
+    <div class="branch"><span class="branch-icon base">◈</span><div><small>COMMON BASE</small><strong id="base-label"></strong></div></div>
+    <span class="branch-link">↗</span>
+    <div class="branch"><span class="branch-icon a">A</span><div><small>LEFT BRANCH</small><strong id="a-label"></strong></div></div>
+    <span class="branch-link">⇄</span>
+    <div class="branch"><span class="branch-icon b">B</span><div><small>RIGHT BRANCH</small><strong id="b-label"></strong></div></div>
+    <span class="spacer"></span><span id="source-badge" class="subtle-pill"></span>
+  </section>
+  <main class="workspace">
+    <aside class="sidebar" aria-label="Files and scene tree">
+      <div class="sidebar-head"><span class="eyebrow">PROJECT CHANGES</span><span id="file-count" class="count"></span></div>
+      <label class="search"><span>⌕</span><input id="search" type="search" placeholder="Find a file, node, or resource…" aria-label="Search files and entities"></label>
+      <div id="file-list" class="file-list"></div>
+      <div class="sidebar-head tree-heading"><span class="eyebrow">SCENE OUTLINE</span><span id="entity-count" class="count"></span></div>
+      <div id="scene-tree" class="scene-tree"></div>
+      <div class="legend"><span><i class="dot added"></i> Added</span><span><i class="dot modified"></i> Changed</span><span><i class="dot conflict"></i> Conflict</span></div>
+    </aside>
+    <section class="content">
+      <div class="summarybar"><div id="summary"></div><label class="toggle"><input id="conflicts-only" type="checkbox"> Conflicts only</label></div>
+      <div class="content-head"><div class="breadcrumb" id="breadcrumb"></div><h1 id="entity-title"></h1><div id="entity-subtitle" class="muted"></div></div>
+      <div class="tabs" role="tablist" aria-label="Comparison views">
+        <button role="tab" data-tab="properties" aria-selected="true">▤ &nbsp;Properties</button><button role="tab" data-tab="resources">◇ &nbsp;Resources</button><button role="tab" data-tab="signals">ϟ &nbsp;Signals</button><button role="tab" data-tab="raw">⌘ &nbsp;Raw diff</button>
+        <span class="spacer"></span><label class="toggle" id="unchanged-toggle"><input id="show-unchanged" type="checkbox"> Show unchanged</label>
+      </div>
+      <div id="comparison" class="comparison"></div>
+      <div id="resolution" class="resolution"></div>
+    </section>
+    <aside class="inspector" aria-label="Review and impact">
+      <section class="panel"><span class="eyebrow">REVIEW PROGRESS</span><div id="progress-title" class="progress-title"></div><div class="progress-track"><div id="progress-fill"></div></div><p class="muted small" id="progress-description"></p><button id="next-conflict" class="wide">Next unresolved conflict →</button></section>
+      <section class="panel"><span class="eyebrow">CHANGE IMPACT</span><div id="impact"></div></section>
+      <section class="panel warnings-panel"><span class="eyebrow">REVIEW NOTES</span><div id="warnings"></div></section>
+      <section class="review-note"><span>◇</span><p>Review confidently. Decisions are saved in a review plan. Your project files stay untouched.</p></section>
+    </aside>
+  </main>
+  <footer><span class="status-dot"></span><span id="footer-status">Ready to compare</span><span class="spacer"></span><span class="shortcut-hint">Select a property · A / B to choose</span><button id="export-plan" class="primary">Export review plan ↗</button></footer>
+  <dialog id="compare-dialog">
+    <form id="compare-form">
+      <div class="dialog-head"><div><span class="eyebrow">A CLEARER VIEW OF YOUR CHANGES</span><h2>New comparison</h2></div><button type="button" id="close-dialog" aria-label="Close comparison dialog" class="icon-button">×</button></div>
+      <div class="mode-switch"><button type="button" data-mode="git" class="active">Git branches</button><button type="button" data-mode="files">Local files</button></div>
+      <div id="git-fields"><label>Project repository<input name="repo" placeholder="/path/to/your/godot-project" autocomplete="off"></label><div class="form-grid"><label>Branch A<input name="left" placeholder="alice/layout" autocomplete="off"></label><label>Branch B<input name="right" placeholder="bob/lighting" autocomplete="off"></label></div><label>Common base <span class="muted">optional · detected automatically</span><input name="base" placeholder="main or a commit SHA" autocomplete="off"></label><label>File or folder <span class="muted">optional</span><input name="path" placeholder="scenes/forest.tscn" autocomplete="off"></label><p class="hint">Compares committed snapshots. Commit your work first; no checkout or network fetch is performed.</p></div>
+      <div id="file-fields" hidden><label>Version A<input id="file-a" type="file" accept=".tscn,.tres,.gd,.gdshader,.cs,.txt"></label><label>Version B<input id="file-b" type="file" accept=".tscn,.tres,.gd,.gdshader,.cs,.txt"></label><label>Common base <span class="muted">optional · enables conflict detection</span><input id="file-base" type="file" accept=".tscn,.tres,.gd,.gdshader,.cs,.txt"></label><p class="hint">Files are compared locally. Choose the base, A, and B versions of the same file.</p></div>
+      <div id="form-error" class="form-error" role="alert"></div><div class="dialog-actions"><span class="muted small">No account or Godot installation required</span><button id="submit-compare" type="submit" class="primary">Compare changes →</button></div>
+    </form>
+  </dialog>
+  <div id="toast" role="status" hidden></div>
+  <script type="application/json" id="boot">__BOOT_DATA__</script>
+  <script>/*__APP__*/</script>
+</body>
+</html>

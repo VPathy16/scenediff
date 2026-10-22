@@ -1,0 +1,42 @@
+[gd_scene load_steps=6 format=3]
+
+[ext_resource type="Script" path="res://player.gd" id="1_player"]
+[ext_resource type="Material" path="res://ground.tres" id="2_ground"]
+[ext_resource type="Script" path="res://goblin.gd" id="3_goblin"]
+
+[sub_resource type="StandardMaterial3D" id="Material_armor"]
+resource_name = "Adventurer armor"
+albedo_color = Color(0.85, 0.2, 0.25, 1)
+roughness = 0.8
+metallic = 0.0
+
+[sub_resource type="BoxMesh" id="Mesh_body"]
+size = Vector3(0.6, 1.2, 0.4)
+
+[node name="World" type="Node3D"]
+
+[node name="Player" type="CharacterBody3D" parent="."]
+position = Vector3(3, 0, 0)
+script = ExtResource("1_player")
+speed = 5.0
+
+[node name="Body" type="MeshInstance3D" parent="Player"]
+mesh = SubResource("Mesh_body")
+material_override = SubResource("Material_armor")
+
+[node name="Shield" type="MeshInstance3D" parent="Player"]
+position = Vector3(0.5, 0, 0)
+mesh = SubResource("Mesh_body")
+material_override = SubResource("Material_armor")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+light_energy = 1.5
+light_color = Color(1, 0.96, 0.85, 1)
+rotation = Vector3(-0.5, 0.25, 0)
+shadow_enabled = false
+
+[node name="Enemies" type="Node3D" parent="."]
+
+[node name="Goblin" type="CharacterBody3D" parent="Enemies"]
+position = Vector3(4, 0, 2)
+script = ExtResource("3_goblin")

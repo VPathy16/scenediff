@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "godot-scenediff"
+version = "0.1.0"
+description = "A local, scene-aware diff and review tool for Godot projects"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "SceneDiff contributors"}]
+dependencies = []
+
+[project.optional-dependencies]
+desktop = ["pywebview>=5"]
+
+[project.scripts]
+scenediff = "scenediff.cli:main"
+
+[tool.setuptools.package-data]
+scenediff = ["web/*", "examples/*/*"]
+
+[tool.setuptools.packages.find]
+include = ["scenediff*"]
