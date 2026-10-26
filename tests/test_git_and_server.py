@@ -134,5 +134,57 @@ class ServerAndReportTests(unittest.TestCase):
             self.assertEqual(main(['demo','--no-open','-o',str(path)]),2)
             self.assertEqual(path.read_text(),'original')
 
+    def test_legacy_node_match_confirmation_undo_and_stale_request(self):
+        _, html = self.request()
+        boot = json.loads(re.search(r'<script type="application/json" id="boot">(.*?)</script>', html, re.S)[1])
+        headers = {'X-SceneDiff-Token': boot['token'], 'Content-Type': 'application/json'}
+        fixtures = Path(__file__).parent / 'fixtures' / 'godot2'
+        payload = {'base': (fixtures / 'base.tscn').read_text(), 'left': (fixtures / 'renamed.tscn').read_text(),
+                   'right': (fixtures / 'edited.tscn').read_text(), 'name': 'legacy.tscn'}
+        status, body = self.request('/api/files', 'POST', json.dumps(payload), headers)
+        self.assertEqual(status, 200)
+        original = json.loads(body)
+        request = {'report_id': original['id'], 'path': 'legacy.tscn',
+                   'node_matches': [{'side': 'left', 'base_path': 'Player', 'target_path': 'Actors/Hero'}]}
+        status, body = self.request('/api/match', 'POST', json.dumps(request), headers)
+        self.assertEqual(status, 200)
+        updated = json.loads(body)
+        self.assertEqual(updated['summary']['conflicts'], 0)
+        self.assertEqual(updated['files'][0]['sources'], [payload['base'], payload['left'], payload['right']])
+        self.assertEqual(self.request('/api/match', 'POST', json.dumps(request), headers)[0], 400)
+        request['report_id'] = updated['id']
+        request['node_matches'] = None
+        self.assertEqual(self.request('/api/match', 'POST', json.dumps(request), headers)[0], 400)
+        request['node_matches'] = []
+        status, body = self.request('/api/match', 'POST', json.dumps(request), headers)
+        self.assertEqual(status, 200)
+        self.assertGreater(json.loads(body)['summary']['conflicts'], 0)
+
+    def test_matching_preserves_git_dependency_warnings(self):
+        from scenediff.semantic import compare_file, report
+        fixtures = Path(__file__).parent / 'fixtures' / 'godot2'
+        sources = [(fixtures / (name + '.tscn')).read_text() for name in ('base', 'renamed', 'edited')]
+        item = compare_file('legacy.tscn', *sources)
+        warning = 'A: referenced file res://player.gd is absent from this commit.'
+        item['warnings'].append(warning)
+        other = create_server(initial=report([item], ['Base', 'A', 'B']))
+        other_thread = threading.Thread(target=other.serve_forever, daemon=True)
+        other_thread.start()
+        try:
+            connection = http.client.HTTPConnection('127.0.0.1', other.server_port)
+            connection.request('GET', '/')
+            html = connection.getresponse().read().decode()
+            boot = json.loads(re.search(r'<script type="application/json" id="boot">(.*?)</script>', html, re.S)[1])
+            connection.request('POST', '/api/match', json.dumps({'report_id': boot['report']['id'], 'path': 'legacy.tscn',
+                'node_matches': [{'side': 'left', 'base_path': 'Player', 'target_path': 'Actors/Hero'}]}),
+                {'X-SceneDiff-Token': boot['token'], 'Content-Type': 'application/json'})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            updated = json.loads(response.read())
+            self.assertIn(warning, updated['files'][0]['warnings'])
+            connection.close()
+        finally:
+            other.shutdown(); other.server_close(); other_thread.join()
+
 
 if __name__ == '__main__': unittest.main()

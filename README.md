@@ -81,6 +81,21 @@ Without a base, this is a two-way comparison: differences are not labeled confli
 
 The conflict summary counts affected **entities/files**; the progress panel counts individual **decisions**. Structural conflicts require both a structural decision and decisions for any conflicting properties. Recorded choices can still be mutually inconsistent; validate them when implementing a merge.
 
+### Renamed and reparented nodes, including legacy scenes
+
+In the local app, open a scene comparison and expand **Node identity**. SceneDiff suggests correspondences between removed and added paths using the serialized node type, script, instanced scene, agreeing properties, and relative child structure. Godot 2's `script/script` spelling and numeric resource IDs are understood.
+
+For example, Alice renames `Player` to `Hero` and moves it under `Actors`, while Bob edits `Player.speed`. Click **Match nodes** on `Player → Actors/Hero`. The comparison now shows the name/parent edits and Bob's speed edit on the same logical node. Matching a parent also aligns compatible descendants at unchanged relative paths, keeping child-order and resource-reference comparisons anchored to the confirmed identity.
+
+- Similarity suggestions are **never applied automatically**, including apparently unique matches. Deleted/recreated identical nodes cannot be distinguished reliably from renames in an ID-less file.
+- Multiple plausible candidates are labeled ambiguous. Use **Original node / New node → Match selected nodes** when evidence is too weak to produce a suggestion.
+- Matching is one-to-one. A match cannot steal a path that still exists, and roots are already matched without needing confirmation.
+- **Undo match** restores the original path-based comparison. Matching or undoing clears property decisions for that file so stale choices cannot survive changed identities; other files keep their decisions.
+- Saved HTML reports and JSON review plans retain the confirmed mappings. A saved HTML report displays matches but requires the local app to change them.
+- Matching changes the comparison only. It does not rewrite scenes, NodePaths, signals, animations, or scripts, and does not prove runtime compatibility.
+
+The test fixtures in `tests/fixtures/godot2/` exercise legacy `format=1` syntax, numeric resource IDs, and rename/reparent scenarios. They are handcrafted fixtures, not a claim that every Godot 2.1.5 scene or runtime behavior is supported. This matcher does not yet use Godot 4.6's native node IDs.
+
 ## Git difftool integration
 
 After installing `scenediff` into an environment on your PATH, run these commands from your Godot repository (POSIX shell or Git Bash):
@@ -118,7 +133,7 @@ scenediff git alice/layout bob/lighting --repo /path/to/project --json --check
 | Node deleted while its descendant is added/edited | Structural conflict |
 | Different nodes added at the same path | Structural add/add conflict |
 | Reordered children | Explicit child-order entity; conflicting orders require review |
-| Renamed/moved nodes | Add/remove entries, with a possible-move note; no speculative identity rewrite |
+| Renamed/moved nodes | Evidence-backed suggestions and explicit reviewer matching; compatible descendants follow a confirmed parent |
 | Inherited/instanced scenes | Compare serialized overrides and note that inherited defaults are not expanded |
 | Missing external files | Git mode checks direct `res://` declarations against each committed tree |
 | Changed external material/script | Reference index scans up to 500 `.tscn`/`.tres` files in branch B; not a complete runtime dependency graph |

@@ -65,6 +65,50 @@ def main():
             expect(page.locator("#breadcrumb")).to_have_text("ground.tres")
             expect(page.locator("#source-badge")).to_have_text("LOCAL FILES")
 
+            # Legacy scene rename + parent change, with another author's edit.
+            page.locator("#new-comparison").click()
+            fixture_dir = Path(__file__).parent / "fixtures" / "godot2"
+            for field, name in [("file-base", "base"), ("file-a", "renamed"), ("file-b", "edited")]:
+                page.locator("#" + field).set_input_files(fixture_dir / (name + ".tscn"))
+            page.locator("#submit-compare").click()
+            expect(page.locator("#compare-dialog")).not_to_be_visible()
+            expect(page.locator("#node-matches")).to_contain_text("Same script")
+            parent_match = page.locator(".match-row").filter(has_text="Base: Player → A: Actors/Hero").first
+            parent_match.get_by_role("button", name="Match nodes", exact=True).click()
+            expect(page.locator("#node-matches")).to_contain_text("1 confirmed")
+            page.locator('[data-entity="node:Player"]').click()
+            expect(page.locator("#impact")).to_contain_text("Actors/Hero")
+            expect(page.locator('[data-property="speed"]')).to_contain_text("300")
+            expect(page.locator("#summary")).to_contain_text("0 conflict items")
+            with page.expect_download() as download_event:
+                page.locator("#export-plan").click()
+            download_event.value.save_as(plan_path)
+            matched_plan = json.loads(plan_path.read_text())
+            assert matched_plan["node_matches"][0]["matches"][0]["target_path"] == "Actors/Hero"
+            with page.expect_download() as download_event:
+                page.locator("#save-report").click()
+            matched_report = Path(directory) / "matched.html"
+            download_event.value.save_as(matched_report)
+            offline.goto(matched_report.as_uri())
+            expect(offline.locator("#node-matches")).to_contain_text("1 confirmed")
+            offline.locator("#node-matches summary").click()
+            expect(offline.get_by_role("button", name="Undo match")).to_be_disabled()
+            page.locator("#node-matches summary").click()
+            page.get_by_role("button", name="Undo match").click()
+            expect(page.locator("#node-matches")).to_contain_text("0 confirmed")
+            expect(page.locator('[data-entity="node:Actors/Hero"]')).to_be_visible()
+
+            # A plain empty node has too little evidence: manual matching still works.
+            plain = '[gd_scene format=1]\n[node name="Root" type="Node"]\n[node name="Old" type="Node" parent="."]\n'
+            page.locator("#new-comparison").click()
+            for field, content in [("file-base", plain), ("file-a", plain.replace('name="Old"', 'name="New"')), ("file-b", plain)]:
+                page.locator("#" + field).set_input_files({"name":"plain.tscn", "mimeType":"text/plain", "buffer":content.encode()})
+            page.locator("#submit-compare").click()
+            expect(page.locator("#compare-dialog")).not_to_be_visible()
+            page.locator("#node-matches summary").click()
+            page.locator("#manual-match-confirm").click()
+            expect(page.locator("#node-matches")).to_contain_text("1 confirmed")
+
             # Untrusted scene strings must remain text in both live and saved views.
             hostile = '[gd_scene format=3]\n[node name="<img src=x onerror=alert(1)>" type="Node"]\n'
             page.locator("#new-comparison").click()
@@ -79,7 +123,7 @@ def main():
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
             assert not errors, errors
             browser.close()
-            print("Browser checks passed: comparison, decisions, exports, offline report, file input, escaping, responsive layout.")
+            print("Browser checks passed: comparison, decisions, exports, legacy rename/reparent matching, undo, manual matches, offline reports, escaping, responsive layout.")
     finally:
         server.shutdown()
         server.server_close()
