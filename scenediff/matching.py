@@ -164,7 +164,18 @@ def identities(docs, confirmed=None, *, three_way=True):
                 pairs[path] = path
                 claimed[path] = path
         for path in target:
-            maps[index][path] = claimed.get(path, path)
+            logical = claimed.get(path, path)
+            if path not in claimed:
+                # New children beneath a renamed/moved parent share that
+                # parent's logical location across both branches. Do not use
+                # this to infer replacement identities for existing children.
+                ancestors = [p for p in claimed if p != "." and path.startswith(p + "/")]
+                if ancestors:
+                    parent = max(ancestors, key=len)
+                    candidate = claimed[parent] + path[len(parent):]
+                    if candidate not in base:
+                        logical = candidate
+            maps[index][path] = logical
         if len(set(maps[index].values())) != len(maps[index]):
             raise MatchError("Node matches produce conflicting identities")
 

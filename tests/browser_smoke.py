@@ -73,6 +73,7 @@ def main():
             page.locator("#submit-compare").click()
             expect(page.locator("#compare-dialog")).not_to_be_visible()
             expect(page.locator("#node-matches")).to_contain_text("Same script")
+            page.screenshot(path="/tmp/scenediff-ui.png", full_page=True)
             parent_match = page.locator(".match-row").filter(has_text="Base: Player → A: Actors/Hero").first
             parent_match.get_by_role("button", name="Match nodes", exact=True).click()
             expect(page.locator("#node-matches")).to_contain_text("1 confirmed")

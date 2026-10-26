@@ -128,6 +128,15 @@ class LegacyMatchingTests(unittest.TestCase):
         self.assertEqual(node(result, "Actors")["status"], "conflict")
         self.assertEqual(node(result, "Player")["structural_conflict"], "ancestor deletion")
 
+    def test_additions_under_renamed_parent_are_compared_together(self):
+        a = self.left + '\n[node name="New" type="Sprite" parent="Actors/Hero"]\nopacity = 0.4\n'
+        b = self.right + '\n[node name="New" type="Sprite" parent="Player"]\nopacity = 0.7\n'
+        result = compare_scene(self.base, a, b, node_matches=[matched()])
+        addition = node(result, "Player/New")
+        self.assertEqual(addition["exists"], [False, True, True])
+        self.assertEqual(addition["structural_conflict"], "add/add")
+        self.assertEqual(prop(addition, "opacity")["status"], "conflict")
+
 
 if __name__ == "__main__":
     unittest.main()
