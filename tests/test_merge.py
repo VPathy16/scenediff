@@ -229,5 +229,17 @@ class MergeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'missing SubResource'):
             apply(a,b,resource_key(a,b),source=2)
 
+    def test_preexisting_orphan_node_does_not_block_unrelated_apply(self):
+        orphan='\n[node name="Icon" type="Sprite2D" parent="Gone"]\n'
+        text,warnings,_=merge_selection([None,scene('x = 1',orphan),scene('x = 2',orphan)],2,'node:.','x','scene.tscn')
+        self.assertIn('x = 2',text)
+        self.assertIn('parent="Gone"',text)
+        self.assertTrue(any('already had 1 structural problem' in w for w in warnings))
+
+    def test_new_orphan_is_refused_and_names_the_parent(self):
+        child='\n[node name="P" type="Node3D" parent="."]\n\n[node name="Kid" type="Node3D" parent="P"]\n'
+        with self.assertRaisesRegex(ValueError,'missing the parent of P/Kid: P'):
+            apply(scene(),scene(children=child),'node:P/Kid',source=2)
+
 if __name__=='__main__':
     unittest.main()

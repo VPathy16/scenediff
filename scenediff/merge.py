@@ -53,6 +53,32 @@ def _serialize(doc, original):
     return "".join(chunks)
 
 
+def _structure_problems(sections):
+    """Nodes, signals and editable paths that point at nodes the document lacks."""
+    nodes = {node_path(s): s for s in sections if s.kind == 'node'}
+    instanced = {p for p, s in nodes.items() if 'instance' in s.attrs}
+    def exists(path):
+        return path in nodes or any(_under(path, p) for p in instanced)
+    problems = {}
+    for path, node in nodes.items():
+        parent = unquote(node.attrs.get('parent', ''))
+        if path != '.' and not exists(parent):
+            problems[('parent', path)] = (f"Target is missing the parent of {path}: {parent}. "
+                                          f"Apply the node {parent} first.")
+    for section in sections:
+        if section.kind == 'connection':
+            for k in ('from', 'to'):
+                endpoint = unquote(section.attrs.get(k, ''))
+                if not exists(endpoint):
+                    signal = unquote(section.attrs.get('signal', '?'))
+                    problems[('signal', signal, k, endpoint)] = f"Signal {signal} connects to {endpoint}, which the target does not have. Apply that node first."
+        if section.kind == 'editable':
+            path = unquote(section.attrs.get('path', ''))
+            if not exists(path):
+                problems[('editable', path)] = f"Editable instance path {path} is absent in the target."
+    return problems
+
+
 class SceneMerge:
     def __init__(self, sources, source, imports=None):
         if type(source) is not int or source not in (1, 2):
@@ -99,6 +125,7 @@ class SceneMerge:
         defined = _resources(self.original)
         self.already_missing = {ref for s in self.original.sections for v in _values(s)
                                 for ref in references(v) if ref not in defined}
+        self.already_broken = _structure_problems(self.original.sections)
 
     def _replace(self, old, new):
         index = next(i for i, s in enumerate(self.result.sections) if s is old)
@@ -341,21 +368,19 @@ class SceneMerge:
             raise ValueError("Merge would create duplicate node paths.")
         if self.original.sections[0].kind == 'gd_scene' and '.' not in nodes:
             raise ValueError("A scene must contain a root node.")
-        instanced = {p for p, s in nodes.items() if 'instance' in s.attrs}
-        def exists(path):
-            return path in nodes or any(_under(path, p) for p in instanced)
-        for path, node in nodes.items():
-            if path != '.' and not exists(unquote(node.attrs.get('parent', ''))):
-                raise ValueError(f"Target is missing the parent of {path}. Apply its parent node first.")
-            if 'name' not in node.attrs:
-                raise ValueError("Nodes must have a name.")
-        for section in sections:
-            if section.kind == 'connection':
-                for k in ('from', 'to'):
-                    if not exists(unquote(section.attrs.get(k, ''))):
-                        raise ValueError("A signal endpoint is absent in the target. Apply its node first.")
-            if section.kind == 'editable' and not exists(unquote(section.attrs.get('path', ''))):
-                raise ValueError("An editable instance path is absent in the target.")
+        if any('name' not in node.attrs for node in nodes.values()):
+            raise ValueError("Nodes must have a name.")
+        # Only problems introduced by this apply are refused; ones the target already had are reported.
+        problems = _structure_problems(sections)
+        for key, message in problems.items():
+            if key not in self.already_broken:
+                raise ValueError(message)
+        if problems:
+            examples = "; ".join(list(problems.values())[:3])
+            more = f" (and {len(problems) - 3} more)" if len(problems) > 3 else ""
+            self.warnings.append(f"The target already had {len(problems)} structural problem{'s' if len(problems) != 1 else ''} "
+                                 f"before this apply, left as they were: {examples}{more}. "
+                                 "Godot may drop or misplace these nodes until they are fixed.")
         if self.original.sections[0].kind == 'gd_resource' and sum(s.kind == 'resource' for s in sections) != 1:
             raise ValueError("A resource file must contain one resource section.")
         # Definitions must precede their uses; keep stable sibling order for nodes.
