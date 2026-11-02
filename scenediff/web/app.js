@@ -333,9 +333,9 @@
         if (!payload.repo || !payload.left || !payload.right) throw Error("Enter the repository path and both branches.");
       } else {
         const a=$("file-a").files[0], b=$("file-b").files[0], base=$("file-base").files[0];
-        if (!a || !b) throw Error("Choose version A and version B.");
+        if (!a) throw Error("Choose version A, or a single file containing Git conflict markers.");
         if ([a,b,base].some(f => f && f.size > 8*1024*1024)) throw Error("Each file must be 8 MiB or smaller.");
-        payload={left:await a.text(),right:await b.text(),base:base ? await base.text() : null,name:b.name};
+        payload={left:await a.text(),right:b ? await b.text() : null,base:base ? await base.text() : null,name:(b || a).name};
       }
       const response=await fetch(`/api/${mode}`,{method:"POST",headers:{"Content-Type":"application/json","X-SceneDiff-Token":boot.token},body:JSON.stringify(payload)});
       const result=await response.json(); if (!response.ok) throw Error(result.error || "Comparison failed");

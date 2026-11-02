@@ -10,7 +10,7 @@ from pathlib import Path
 from . import __version__
 from .gitrepo import MAX_FILE, compare_git, decode
 from .report import demo, render
-from .semantic import compare_file, report
+from .semantic import compare_local
 from .server import create_server
 
 
@@ -22,9 +22,9 @@ def parser():
     serve.add_argument("--port", type=int, default=0)
     serve.add_argument("--no-open", action="store_true")
     serve.add_argument("--desktop", action="store_true", help="Use an optional native window (pip install '.[desktop]')")
-    files = commands.add_parser("files", help="Compare two files, with an optional common base")
+    files = commands.add_parser("files", help="Compare two files with an optional common base, or one file containing Git conflict markers")
     files.add_argument("left", type=Path)
-    files.add_argument("right", type=Path)
+    files.add_argument("right", type=Path, nargs="?")
     files.add_argument("--base", type=Path)
     git = commands.add_parser("git", help="Compare committed Git branches using their merge base")
     git.add_argument("left")
@@ -87,9 +87,8 @@ def main(argv=None):
                 value, is_binary = decode(path.read_bytes())
                 binary |= is_binary
                 contents.append(value)
-            payload = report([compare_file(args.right.name, *contents, three_way=args.base is not None, binary=binary)],
-                             [str(args.base or "No base"), str(args.left), str(args.right)], three_way=args.base is not None,
-                             context={"source": "files"})
+            name = (args.right or args.left).name
+            payload = compare_local(name, *contents, labels=[str(args.base or "No base"), str(args.left), str(args.right or "")], binary=binary)
         if args.json:
             print(json.dumps(payload, indent=2, ensure_ascii=True))
         else:

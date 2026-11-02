@@ -7,6 +7,7 @@ import hashlib
 import json
 from collections import defaultdict
 
+from .conflicts import has_conflict_markers, split_conflicts
 from .parser import Document, ParseError, canonical, node_path, parse, references, unquote
 
 
@@ -265,8 +266,53 @@ def compare_file(path: str, base: str | None, left: str | None, right: str | Non
             elif three_way and status == "conflict":
                 result["status"] = "combined"
         except (ParseError, RecursionError) as exc:
-            result["warnings"] = [f"Semantic comparison unavailable: {exc}. Review the complete raw diff."]
+            marked = [label for label, text in zip(("Base", "A", "B"), (base, left, right)) if has_conflict_markers(text)]
+            if marked:
+                result["warnings"] = [f"Semantic comparison unavailable: {' and '.join(marked)} contain{'s' if len(marked) == 1 else ''} "
+                                      "unresolved Git conflict markers (<<<<<<< / ======= / >>>>>>>). "
+                                      "Compare the conflicted file on its own to review both sides of each conflict."]
+            else:
+                result["warnings"] = [f"Semantic comparison unavailable: {exc}. Review the complete raw diff."]
     return result
+
+
+def compare_local(name: str, base: str | None, left: str | None, right: str | None, *,
+                  labels=("Base", "A", "B"), binary=False) -> dict:
+    """Compare local files. A file with Git conflict markers is split into its sides.
+
+    The conflicted file may be given alone (as A) or with other files, which are
+    then ignored because the markers already hold both sides of the merge.
+    """
+    labels = list(labels)
+    marked = [i for i, text in enumerate((base, left, right)) if not binary and has_conflict_markers(text)]
+    if not marked:
+        if left is None or right is None:
+            raise ValueError("Choose both A and B, or a single file containing Git conflict markers")
+        three = base is not None
+        item = compare_file(name, base, left, right, three_way=three, binary=binary)
+        return report([item], labels, three_way=three, context={"source": "files"})
+    if len(marked) > 1:
+        raise ValueError("More than one file contains Git conflict markers; choose a single conflicted file")
+    index = marked[0]
+    split = split_conflicts((base, left, right)[index])
+    # A diff3 ancestor is the authoritative base; otherwise use a separately provided base.
+    use_base = split.base is None and index != 0 and base is not None
+    ancestor = split.base if split.base is not None else base if use_base else None
+    ignored = [labels[i] for i, text in enumerate((base, left, right))
+               if i != index and text is not None and not (i == 0 and use_base)]
+    three = ancestor is not None
+    item = compare_file(name, ancestor, split.ours, split.theirs, three_way=three)
+    plural = "s" if split.regions != 1 else ""
+    item["warnings"].insert(0, f"{labels[index]} contains {split.regions} unresolved Git conflict region{plural}. "
+                               f"A is its “{split.ours_label}” side and B is its “{split.theirs_label}” side"
+                               + (f"; the base is the recorded ancestor ({split.base_label})." if split.base is not None
+                                  else "; the base is the separately chosen file." if three
+                                  else ". Add a common base (or use git config merge.conflictStyle diff3) to detect conflicts."))
+    if ignored:
+        item["warnings"].insert(1, f"Ignored {', '.join(ignored)}: the conflicted file already contains both sides of the merge.")
+    side_labels = [split.base_label or (labels[0] if three else "Not provided"), split.ours_label, split.theirs_label]
+    return report([item], side_labels, three_way=three,
+                  context={"source": "files", "conflict_markers": {"file": labels[index], "regions": split.regions}})
 
 
 def report(files: list[dict], labels: list[str], *, three_way=True, context=None):
