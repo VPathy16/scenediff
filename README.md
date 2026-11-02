@@ -67,6 +67,16 @@ scenediff files before.tres after.tres
 
 Without a base, this is a two-way comparison: differences are not labeled conflicts. Use **Local files** in the app to choose files graphically.
 
+### Review a file with unresolved Git conflict markers
+
+If a merge left `<<<<<<<` / `=======` / `>>>>>>>` markers in a scene, pass that one file (or choose it as **Version A** in the app and leave B empty):
+
+```bash
+scenediff files scenes/level.tscn
+```
+
+SceneDiff splits it into its two sides (labelled from the markers, e.g. `HEAD` and `origin/feature`) and compares them semantically. With `git config merge.conflictStyle diff3` (or `zdiff3`) the recorded ancestor becomes the common base, so real conflicts are detected; otherwise add `--base` with the original file. The conflicted file itself is never modified.
+
 ## Review changes
 
 - **Scene outline:** select nodes, resource definitions, child order, or signal connections.
