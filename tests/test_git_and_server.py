@@ -127,9 +127,9 @@ class ServerAndReportTests(unittest.TestCase):
         self.assertEqual(status,200)
         merged=json.loads(response)
         self.assertEqual(merged['merge']['target'],2)
-        self.assertIn('x = 2',merged['files'][0]['sources'][2])
-        self.assertIn('y = 3',merged['files'][0]['sources'][2])
-        self.assertEqual(merged['files'][0]['sources'][1],request['sources'][1])
+        self.assertIn('x = 2',merged['file']['sources'][2])
+        self.assertIn('y = 3',merged['file']['sources'][2])
+        self.assertEqual(merged['file']['sources'][1],request['sources'][1])
         for field,value in [('source',0),('source',1.0),('source',[]),('sources','invalid'),('property','@name'),('entity',None),('name','file.gd')]:
             with self.subTest(field=field,value=value):
                 status,response=self.request('/api/merge','POST',json.dumps({**request,field:value}),headers)
@@ -155,6 +155,49 @@ class ServerAndReportTests(unittest.TestCase):
             self.assertEqual(main(['demo','--no-open','-o',str(path)]),2)
             self.assertEqual(path.read_text(),'original')
 
+    def boot_headers(self):
+        _, html = self.request()
+        boot = json.loads(re.search(r'<script type="application/json" id="boot">(.*?)</script>', html, re.S)[1])
+        return {'X-SceneDiff-Token': boot['token'], 'Content-Type': 'application/json'}
+
+    def test_legacy_node_match_confirmation_undo_and_invalid_request(self):
+        headers = self.boot_headers()
+        fixtures = Path(__file__).parent / 'fixtures' / 'godot2'
+        sources = [(fixtures / (n + '.tscn')).read_text() for n in ('base', 'renamed', 'edited')]
+        request = {'name': 'legacy.tscn', 'sources': sources, 'three_way': True, 'warnings': [],
+                   'node_matches': [{'side': 'left', 'base_path': 'Player', 'target_path': 'Actors/Hero'}]}
+        status, body = self.request('/api/match', 'POST', json.dumps(request), headers)
+        self.assertEqual(status, 200)
+        updated = json.loads(body)['file']
+        self.assertEqual(sum(e['status'] == 'conflict' for e in updated['entities']), 0)
+        self.assertEqual(updated['sources'], sources)
+        for bad in [None, [{'side': 'left', 'base_path': 'Nope', 'target_path': 'Actors/Hero'}]]:
+            self.assertEqual(self.request('/api/match', 'POST', json.dumps({**request, 'node_matches': bad}), headers)[0], 400)
+        status, body = self.request('/api/match', 'POST', json.dumps({**request, 'node_matches': []}), headers)
+        self.assertEqual(status, 200)
+        self.assertGreater(sum(e['status'] == 'conflict' for e in json.loads(body)['file']['entities']), 0)
+
+    def test_match_and_merge_carry_warnings_from_outside_the_comparison(self):
+        headers = self.boot_headers()
+        fixtures = Path(__file__).parent / 'fixtures' / 'godot2'
+        sources = [(fixtures / (n + '.tscn')).read_text() for n in ('base', 'renamed', 'edited')]
+        warning = 'A: referenced file res://player.gd is absent from this commit.'
+        matches = [{'side': 'left', 'base_path': 'Player', 'target_path': 'Actors/Hero'}]
+        request = {'name': 'legacy.tscn', 'sources': sources, 'three_way': True, 'node_matches': matches, 'warnings': [warning]}
+        status, body = self.request('/api/match', 'POST', json.dumps(request), headers)
+        self.assertEqual(status, 200)
+        matched = json.loads(body)['file']
+        self.assertIn(warning, matched['warnings'])
+        self.assertEqual(matched['extra_warnings'], [warning])
+        # Apply B's speed onto A's renamed node; the match and the warning survive.
+        merge = {**request, 'warnings': matched['warnings'], 'extra_warnings': matched['extra_warnings'],
+                 'source': 2, 'entity': 'node:Player', 'property': 'speed'}
+        status, body = self.request('/api/merge', 'POST', json.dumps(merge), headers)
+        self.assertEqual(status, 200, body)
+        merged = json.loads(body)['file']
+        self.assertIn(warning, merged['warnings'])
+        self.assertEqual(merged['node_matches'], matches)
+        self.assertIn('speed = 300', merged['sources'][1])
 
 if __name__ == '__main__': unittest.main()
 

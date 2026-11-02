@@ -5,19 +5,53 @@ from __future__ import annotations
 import hmac
 import json
 import secrets
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 from .gitrepo import compare_git
 from .report import demo, render
 from .semantic import compare_file, compare_local, report
+from .matching import MatchError
 from .merge import merge_selection
 
 MAX_REQUEST = 32 * 1024 * 1024
 
 
+def refresh_file(data, sources, matches, strict=False):
+    """Re-compare one file after an apply or a match change, from what the page sends.
+
+    Warnings that came from outside the comparison (for example, about Git conflict
+    markers) are carried over; confirmed matches that no longer fit are dropped.
+    """
+    name = data.get("name")
+    if not isinstance(name, str) or not isinstance(sources, list) or len(sources) != 3 or not all(
+            s is None or isinstance(s, str) for s in sources):
+        raise ValueError("Send the file name and its base, A and B sources")
+    if not isinstance(matches, list):
+        raise ValueError("Node matches must be a list")
+    three = bool(data.get("three_way"))
+    carried = data.get("extra_warnings")
+    if not isinstance(carried, list) or not all(isinstance(w, str) for w in carried):
+        previous = data.get("sources") if isinstance(data.get("sources"), list) else sources
+        produced = compare_file(name, *previous, three_way=three)["warnings"]
+        carried = [w for w in data.get("warnings") or [] if isinstance(w, str) and w not in produced]
+    try:
+        item = compare_file(name, *sources, three_way=three, node_matches=matches)
+    except MatchError:
+        if strict:
+            raise
+        item = compare_file(name, *sources, three_way=three)
+        item["warnings"].append("The confirmed node matches no longer fit this version of the file and were cleared.")
+    item["warnings"] = list(dict.fromkeys(item["warnings"] + carried))
+    item["extra_warnings"] = carried
+    return item
+
+
 def create_server(port=0, initial=None):
     token = secrets.token_urlsafe(32)
+    current_report = initial if initial is not None else demo()
+    report_lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -45,11 +79,12 @@ def create_server(port=0, initial=None):
             if not self.local_request():
                 self.send(403, '{"error":"Local requests only"}')
             elif urlsplit(self.path).path == "/":
-                self.send(200, render(initial or demo(), token=token, live=True), "text/html")
+                self.send(200, render(current_report, token=token, live=True), "text/html")
             else:
                 self.send(404, '{"error":"Not found"}')
 
         def do_POST(self):
+            nonlocal current_report
             if not self.local_request() or not hmac.compare_digest(self.headers.get("X-SceneDiff-Token", ""), token):
                 self.send(403, '{"error":"Invalid local session"}')
                 return
@@ -60,7 +95,11 @@ def create_server(port=0, initial=None):
                 data = json.loads(self.rfile.read(length))
                 if not isinstance(data, dict):
                     raise ValueError("Expected a JSON object")
-                if self.path == "/api/git":
+                if self.path == "/api/match":
+                    payload = {"file": refresh_file(data, data.get("sources"), data.get("node_matches"), strict=True)}
+                    self.send(200, json.dumps(payload, ensure_ascii=True))
+                    return
+                elif self.path == "/api/git":
                     for key in ("repo", "left", "right"):
                         if not isinstance(data.get(key), str):
                             raise ValueError(f"Missing {key}")
@@ -69,16 +108,17 @@ def create_server(port=0, initial=None):
                             raise ValueError(f"Invalid {key}")
                     payload = compare_git(data["repo"], data["left"], data["right"], data.get("base") or None, data.get("path") or None)
                 elif self.path == "/api/merge":
-                    sources = data.get("sources")
-                    source = data.get("source")
-                    name = data.get("name", "scene.tscn")
-                    text, warnings, imports = merge_selection(sources, source, data.get("entity"), data.get("property"), name, data.get("imports"))
+                    sources, source = data.get("sources"), data.get("source")
+                    matches = data.get("node_matches") or []
+                    text, warnings, imports = merge_selection(sources, source, data.get("entity"), data.get("property"),
+                                                              data.get("name", "scene.tscn"), data.get("imports"),
+                                                              matches, bool(data.get("three_way")))
                     merged = list(sources)
                     merged[3 - source] = text
-                    three = merged[0] is not None
-                    item = compare_file(name, *merged, three_way=three)
-                    payload = report([item], ["Base", "A", "B"], three_way=three, context={"source": "files"})
-                    payload["merge"] = {"target": 3 - source, "warnings": warnings, "imports": imports}
+                    payload = {"file": refresh_file(data, merged, matches),
+                               "merge": {"target": 3 - source, "warnings": warnings, "imports": imports}}
+                    self.send(200, json.dumps(payload, ensure_ascii=True))
+                    return
                 elif self.path == "/api/files":
                     if not isinstance(data.get("left"), str):
                         raise ValueError("Missing left file contents")
@@ -89,6 +129,8 @@ def create_server(port=0, initial=None):
                 else:
                     self.send(404, '{"error":"Not found"}')
                     return
+                with report_lock:
+                    current_report = payload
                 self.send(200, json.dumps(payload, ensure_ascii=True))
             except (ValueError, OSError) as exc:
                 self.send(400, json.dumps({"error": str(exc)}))

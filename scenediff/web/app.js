@@ -127,6 +127,61 @@
     }).join("")}</tr>`).join("") + "</tbody></table>";
     return html;
   }
+  function renderNodeMatches() {
+    const f = file(), container = $("node-matches");
+    const suggestions = f?.match_suggestions || [], confirmed = f?.node_matches || [], options = f?.match_options || [];
+    container.hidden = !suggestions.length && !confirmed.length && !options.length;
+    if (container.hidden) { container.innerHTML = ""; return; }
+    const sourceLabel = data.three_way ? "Base" : "A";
+    container.innerHTML = `<details ${suggestions.length ? "open" : ""}><summary>Node identity · ${confirmed.length} confirmed · ${suggestions.length} suggestions</summary><p class="small muted">A rename or parent change can look like a deletion and addition. Confirm a match to compare the same node across versions. Matching a parent also matches compatible children at unchanged relative paths. Property decisions for this file will be cleared.</p>${!boot.live ? '<p class="inline-note">This saved report is read-only for node matching. Run SceneDiff locally to confirm or undo matches.</p>' : ""}${confirmed.map((match,i) => `<div class="match-row"><div><b>${escape(sourceLabel + ": " + match.base_path)} → ${escape((match.side === "left" ? "A" : "B") + ": " + match.target_path)}</b><small>Confirmed identity · source files unchanged</small></div><button data-undo-match="${i}" ${boot.live ? "" : "disabled"}>Undo match</button></div>`).join("")}${suggestions.map((match,i) => `<div class="match-row"><div><b>${escape(sourceLabel + ": " + match.base_path)} → ${escape((match.side === "left" ? "A" : "B") + ": " + match.target_path)}</b><small>${escape(match.reasons.join(" · "))}</small>${match.ambiguous ? '<small class="match-ambiguous">Multiple plausible matches — inspect the nodes before choosing.</small>' : '<small>Similarity is a suggestion, not proof of identity.</small>'}</div><button data-confirm-match="${i}" ${boot.live ? "" : "disabled"}>Match nodes</button></div>`).join("")}</details>`;
+    container.querySelectorAll("[data-confirm-match]").forEach(button => button.onclick = () => {
+      const match = suggestions[Number(button.dataset.confirmMatch)];
+      rematch([...confirmed,{side:match.side,base_path:match.base_path,target_path:match.target_path}]);
+    });
+    container.querySelectorAll("[data-undo-match]").forEach(button => button.onclick = () => rematch(confirmed.filter((_,i) => i !== Number(button.dataset.undoMatch))));
+    if (boot.live && options.length) {
+      const sources = options.flatMap(group => group.removed.map(item => ({...item,side:group.side,targets:group.added.filter(target => target.type === item.type)}))).filter(item => item.targets.length);
+      if (sources.length) {
+        const form = document.createElement("div");
+        form.className = "manual-match";
+        form.innerHTML = `<p class="small muted">Know which nodes correspond? You can match them explicitly, even when there is too little evidence for a suggestion.</p><div class="manual-match-controls"><label>Original node<select id="match-source">${sources.map((source,i) => `<option value="${i}">${escape(sourceLabel + ": " + source.path + " → " + (source.side === "left" ? "A" : "B"))}</option>`).join("")}</select></label><label>New node<select id="match-target"></select></label><button id="manual-match-confirm">Match selected nodes</button></div>`;
+        container.querySelector("details").appendChild(form);
+        const populateTargets = () => {
+          const source = sources[Number($("match-source").value)];
+          $("match-target").innerHTML = source.targets.map((target,i) => `<option value="${i}">${escape(target.path)}</option>`).join("");
+        };
+        $("match-source").onchange = populateTargets;
+        populateTargets();
+        $("manual-match-confirm").onclick = () => {
+          const source = sources[Number($("match-source").value)], target = source.targets[Number($("match-target").value)];
+          rematch([...confirmed,{side:source.side,base_path:source.path,target_path:target.path}]);
+        };
+      }
+    }
+  }
+  // What the server needs to re-compare one file (after an apply or a match change).
+  const refreshRequest = f => ({name:f.path, sources:f.sources, three_way:data.three_way, node_matches:f.node_matches || [],
+    warnings:f.warnings, extra_warnings:f.extra_warnings});
+  function replaceFile(index, updated, extra = {}) {
+    const files = data.files.map((item,i) => i === index ? updated : item);
+    data = {...data, ...extra, files, summary:{files:files.length, changed_files:files.filter(f => f.status !== "unchanged").length,
+      conflicts:files.reduce((n,f) => n + (f.entities.length ? f.entities.filter(e => e.status === "conflict").length : Number(f.status === "conflict")),0),
+      warnings:files.reduce((n,f) => n+f.warnings.length,0)}};
+  }
+  async function rematch(matches) {
+    const index = fileIndex, original = file(), path = original.path;
+    $("node-matches").querySelectorAll("button").forEach(button => button.disabled = true);
+    try {
+      const response = await fetch("/api/match",{method:"POST",headers:{"Content-Type":"application/json","X-SceneDiff-Token":boot.token},body:JSON.stringify({...refreshRequest(original),node_matches:matches})});
+      const result = await response.json();
+      if (!response.ok) throw Error(result.error || "Could not match nodes");
+      if (data.files[index] !== original) { toast("The comparison changed while matching. Try again."); return; }
+      replaceFile(index, {...result.file, merge_imports:original.merge_imports, merged_sides:original.merged_sides, merge_warnings:original.merge_warnings});
+      decisions = Object.fromEntries(Object.entries(decisions).filter(([,choice]) => choice.file !== path));
+      selectFile(index);
+      toast("Node matching updated. Review decisions for this file were cleared.");
+    } catch (error) { toast(error.message); renderNodeMatches(); }
+  }
   function renderEntityList(kinds) {
     const items = file()?.entities.filter(e => kinds.includes(e.kind) && visibleEntity(e)) || [];
     return items.map(e => `<button class="entity-card" data-select="${escape(e.key)}"><span class="tree-icon">◇</span><span class="label">${escape(e.label)}<small>${e.rows.filter(r => r.status !== "unchanged").length} changed properties · ${escape(kindLabels[e.kind] || e.kind)}</small></span>${badge(changedLabel(e))}</button>`).join("") || empty("Nothing here", "No matching items in this file.");
@@ -184,6 +239,7 @@
     const existence = e?.exists || f.exists;
     let impact = `<div class="impact-versions">${(data.three_way ? [0,1,2] : [1,2]).map(i => `<span class="${existence[i] ? "" : "missing"}">${["Base","A","B"][i]} ${existence[i] ? "✓" : "—"}</span>`).join("")}</div>`;
     if (e?.lines.some(Boolean)) impact += `<div class="impact-item"><b>SOURCE LOCATION</b>${e.lines.map((line,i) => line ? `${["Base","A","B"][i]}: line ${line}` : "").filter(Boolean).join(" · ")}</div>`;
+    if (e?.kind === "node" && e.paths && new Set(e.paths.filter(p => p !== null)).size > 1) impact += `<div class="impact-item"><b>NODE PATHS</b>${e.paths.map((path,i) => path !== null ? `<div>${["Base","A","B"][i]}: <code>${escape(path)}</code></div>` : "").join("")}</div>`;
     if (e?.used_by.some(users => users.length)) impact += `<div class="impact-item"><b>RESOURCE REFERENCES</b>${e.used_by.map((users,i) => users.length ? `<p><b>${["Base","A","B"][i]}</b>${users.map(u => `<code>${escape(u)}</code>`).join("<br>")}</p>` : "").join("")}</div>`;
     if (f.referenced_by?.length) impact += `<div class="impact-item"><b>REFERENCED BY · BRANCH B</b>${f.referenced_by.map(p => `<code>${escape(p)}</code>`).join("<br>")}</div>`;
     if (!e?.used_by.some(users => users.length) && !f.referenced_by?.length) impact += '<p class="small muted">Inspect the serialized properties and raw source to understand the scope of this change.</p>';
@@ -222,7 +278,7 @@
     });
     $("comparison").querySelectorAll("[data-select]").forEach(button => button.onclick = () => selectEntity(button.dataset.select));
     $("comparison").querySelectorAll("[data-raw]").forEach(button => button.onclick = () => { rawMode = button.dataset.raw; render(); });
-    renderMerge(); renderResolution(); renderInspector();
+    renderMerge(); renderNodeMatches(); renderResolution(); renderInspector();
   }
   function download(name,contents,type) {
     const url = URL.createObjectURL(new Blob([contents],{type}));
@@ -269,20 +325,17 @@
     const previous = {data, decisions:{...decisions}, index, entityKey, selectedProperty};
     merging = true; mergeError = ""; renderMerge();
     try {
-      const response = await fetch('/api/merge', {method:'POST', headers:{'Content-Type':'application/json','X-SceneDiff-Token':boot.token}, body:JSON.stringify({name:f.path, sources:f.sources, source, entity:e.key, property, imports:f.merge_imports?.[source] || []})});
+      const response = await fetch('/api/merge', {method:'POST', headers:{'Content-Type':'application/json','X-SceneDiff-Token':boot.token}, body:JSON.stringify({...refreshRequest(f), source, entity:e.key, property, imports:f.merge_imports?.[source] || []})});
       const result = await response.json();
       if (!response.ok) throw Error(result.error || 'Merge failed');
-      const updated = result.files[0];
+      const updated = result.file;
       updated.merge_imports = {...f.merge_imports, [source]:result.merge.imports};
       updated.merged_sides = [...new Set([...(f.merged_sides || []),result.merge.target])];
       updated.merge_warnings = [...new Set([...(f.merge_warnings || []),...result.merge.warnings])];
-      const files = data.files.map((item,i) => i === index ? updated : item);
       mergeHistory.push(previous);
       if (mergeHistory.length > 20) mergeHistory.shift();
-      data = {...data, id:'merge-' + result.id, files, context:{...data.context, merge_preview:true},
-        applied_changes:[...(data.applied_changes || []), {file:f.path, entity:e.key, property, source, target:result.merge.target}],
-        summary:{files:files.length, changed_files:files.filter(f => f.status !== 'unchanged').length,
-          conflicts:files.reduce((n,f) => n + (f.entities.length ? f.entities.filter(e => e.status === 'conflict').length : Number(f.status === 'conflict')),0), warnings:files.reduce((n,f) => n+f.warnings.length,0)}};
+      replaceFile(index, updated, {id:'merge-' + data.id.replace(/^merge-/, '') + '-' + mergeHistory.length, context:{...data.context, merge_preview:true},
+        applied_changes:[...(data.applied_changes || []), {file:f.path, entity:e.key, property, source, target:result.merge.target}]});
       decisions = Object.fromEntries(Object.entries(decisions).filter(([,d]) => d.file !== f.path));
       fileIndex=index; entityKey=updated.entities.some(item => item.key === e.key) ? e.key : updated.entities[0]?.key;
       selectedProperty=null; tab='properties'; statusFilter="all";
@@ -308,6 +361,7 @@
     return {format:"scenediff-review-plan",version:1,report_id:data.id,created_at:new Date().toISOString(),labels:data.labels,context:data.context,
       note:"Review-plan decisions do not apply edits. Explicit Apply operations update the downloadable preview separately. Godot runtime validation and custom-value validation are not performed.",
       applied_changes:data.applied_changes || [],
+      node_matches:data.files.filter(f => f.node_matches?.length).map(f => ({file:f.path,matches:f.node_matches})),
       decisions:Object.values(decisions),unresolved:conflicts().filter(c => !decisions[c.key]).map(c => ({file:c.f.path,entity:c.e?.key || null,property:c.prop}))};
   }
   $("export-plan").onclick = () => download("scenediff-review.json",JSON.stringify(reviewPlan(),null,2),"application/json");

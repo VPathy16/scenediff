@@ -9,6 +9,7 @@ import json
 from pathlib import PurePosixPath
 
 from .parser import Document, TOKEN, canonical, node_path, parse, references, unquote
+from .matching import _descriptions, _evidence, identities
 from .semantic import model, resource_maps
 
 MAX_FILE = 8 * 1024 * 1024
@@ -80,7 +81,7 @@ def _structure_problems(sections):
 
 
 class SceneMerge:
-    def __init__(self, sources, source, imports=None):
+    def __init__(self, sources, source, imports=None, node_matches=None, three_way=None):
         if type(source) is not int or source not in (1, 2):
             raise ValueError("Choose source A (1) or B (2).")
         if not isinstance(sources, list) or len(sources) != 3:
@@ -92,8 +93,12 @@ class SceneMerge:
         if sources[self.target_index] is None:
             raise ValueError("The target file is absent. Copy the complete source file into your project first.")
         self.docs = [parse(t) if t is not None else None for t in sources]
-        self.maps, _ = resource_maps(self.docs)
-        self.models = [model(d, m) for d, m in zip(self.docs, self.maps)]
+        # Confirmed node matches give a moved/renamed node one logical key on every side.
+        self.node_maps = identities(self.docs, node_matches, three_way=sources[0] is not None if three_way is None else three_way)[0]
+        self.maps, _ = resource_maps(self.docs, self.node_maps)
+        self.models = [model(d, m, n) for d, m, n in zip(self.docs, self.maps, self.node_maps)]
+        self.target_paths = {logical: path for path, logical in self.node_maps[self.target_index].items()}
+        self.source_nodes = {node_path(s): s for s in self.docs[source].sections if s.kind == 'node'} if self.docs[source] else {}
         self.source = self.docs[source]
         self.original = self.docs[self.target_index]
         for doc in (self.source, self.original):
@@ -233,24 +238,91 @@ class SceneMerge:
         self.result.sections = [s for s in self.result.sections if not touches(s)]
         return touches
 
+    def _target_path(self, source_path):
+        """Where a source node is, or would be placed, in the target."""
+        if source_path == '.':
+            return '.'
+        logical = self.node_maps[self.source_index].get(source_path, source_path)
+        if logical in self.target_paths:
+            return self.target_paths[logical]
+        section = self.source_nodes[source_path]
+        parent = self._target_path(unquote(section.attrs.get('parent', '.')))
+        name = unquote(section.attrs['name'])
+        return name if parent == '.' else f"{parent}/{name}"
+
+    def _check_not_moved(self, nodes):
+        """Refuse to add a node that the target already has at another path (moved or re-parented)."""
+        base_keys = set(self.models[0]) if self.docs[0] is not None else None
+        source_keys = set(self.models[self.source_index])
+        target_nodes = {node_path(s): s for s in self.result.sections if s.kind == 'node'}
+        source_info = target_info = None
+        for node in nodes:
+            source_path = node_path(node)
+            source_logical = 'node:' + self.node_maps[self.source_index].get(source_path, source_path)
+            if base_keys is not None and source_logical not in base_keys:
+                continue  # A genuinely new node on the source side cannot have been moved by the target.
+            for path, other in target_nodes.items():
+                if path == '.' or other.attrs.get('name') != node.attrs.get('name') or other.attrs.get('type') != node.attrs.get('type'):
+                    continue
+                logical = 'node:' + self.node_maps[self.target_index].get(path, path)
+                if logical in source_keys:
+                    continue  # The source has it too: a different node.
+                if base_keys is not None:
+                    suspicious = logical not in base_keys  # Target added it: the original moved there.
+                else:
+                    if source_info is None:
+                        source_info = _descriptions(self.source, self.source_nodes)
+                        target_info = _descriptions(self.original, {node_path(s): s for s in self.original.sections if s.kind == 'node'})
+                    evidence = (_evidence(source_path, path, source_info[source_path], target_info[path])
+                                if source_path in source_info and path in target_info else None)
+                    suspicious = bool(evidence and evidence["score"] >= 60)
+                if suspicious:
+                    raise ValueError(
+                        f"The target already has {unquote(node.attrs['name'])} at {path}, which looks like this node "
+                        f"moved or was wrapped in a new parent. Confirm the match under Node identity and apply the "
+                        f"changes to it, or remove {path} first if it really is a different node.")
+
     def _copy_node(self, key, source, target):
-        path = key.removeprefix('node:')
-        if source is None and path == '.':
+        source_root = node_path(source) if source is not None else None
+        root = node_path(target) if target is not None else self._target_path(source_root)
+        if source is None and root == '.':
             raise ValueError("The root node cannot be removed from a scene.")
-        old = [s for s in self.result.sections if s.kind == 'node' and _under(node_path(s), path)]
+        old = [s for s in self.result.sections if s.kind == 'node' and _under(node_path(s), root)]
         index = next((i for i, s in enumerate(self.result.sections) if s in old), None)
         self.result.sections = [s for s in self.result.sections if s not in old]
-        touches = self._remove_links(path)
+        self._remove_links(root)
         if source is None:
             return
-        nodes = [s for s in self.source.sections if s.kind == 'node' and _under(node_path(s), path)]
+        nodes = [s for s in self.source.sections if s.kind == 'node' and _under(node_path(s), source_root)]
+        if target is None:
+            self._check_not_moved(nodes)
+
+        def relocate(path):
+            # A path inside the copied subtree keeps its place relative to the target node.
+            if source_root == '.' or not _under(path, source_root):
+                return self._target_path(path) if source_root != '.' else path
+            return root + path[len(source_root):]
+
         if index is None:
             # Place additions before the next source sibling already present in the target.
             last = self.source.sections.index(nodes[-1])
-            following = {node_path(s) for s in self.source.sections[last + 1:] if s.kind == 'node'}
+            following = {relocate(node_path(s)) for s in self.source.sections[last + 1:] if s.kind == 'node'}
             index = next((i for i, s in enumerate(self.result.sections) if s.kind == 'node' and node_path(s) in following),
                          next((i for i, s in enumerate(self.result.sections) if s.kind in ('connection', 'editable')), len(self.result.sections)))
-        copies = [self._rewrite_section(copy.deepcopy(s)) for s in nodes]
+        copies = []
+        for node in nodes:
+            section = self._rewrite_section(copy.deepcopy(node))
+            path = node_path(node)
+            if path == source_root and target is not None:
+                # The node stays where the target has it: keep its name and parent.
+                for attr in ('name', 'parent'):
+                    if attr in target.attrs:
+                        section.attrs[attr] = target.attrs[attr]
+            elif path != '.':
+                new_path = relocate(path)
+                parent = new_path.rsplit('/', 1)[0] if '/' in new_path else '.'
+                section.attrs['parent'] = json.dumps(parent, ensure_ascii=False)
+            copies.append(section)
         # unique_id is optional in Godot 4. Do not create duplicates across branches.
         ids = {s.attrs.get('unique_id') for s in self.result.sections if s.kind == 'node'}
         for s in copies:
@@ -258,16 +330,23 @@ class SceneMerge:
                 s.attrs.pop('unique_id', None)
             ids.add(s.attrs.get('unique_id'))
         self.result.sections[index:index] = copies
-        for s in self.source.sections:
-            if touches(s):
-                self.result.sections.append(self._rewrite_section(copy.deepcopy(s)))
+        for section in self.source.sections:
+            keys = ('from', 'to') if section.kind == 'connection' else ('path',) if section.kind == 'editable' else ()
+            paths = [unquote(section.attrs[k]) for k in keys if k in section.attrs]
+            if any(_under(p, source_root) for p in paths):
+                section = self._rewrite_section(copy.deepcopy(section))
+                for k in keys:
+                    if k in section.attrs:
+                        section.attrs[k] = json.dumps(relocate(unquote(section.attrs[k])), ensure_ascii=False)
+                self.result.sections.append(section)
 
     def _copy_order(self, key):
-        parent = key.removeprefix('order:')
         source = self.models[self.source_index].get(key)
         if not source:
             raise ValueError("The source has no child order to apply.")
-        wanted = json.loads(source['properties']['children'])
+        logical_parent = key.removeprefix('order:')
+        parent = self.target_paths.get(logical_parent, logical_parent)
+        wanted = [self._target_path(p) for p in json.loads(source['properties']['children'])]
         children = [s for s in self.result.sections if s.kind == 'node' and unquote(s.attrs.get('parent', '')) == parent]
         if set(wanted) != {node_path(s) for s in children}:
             raise ValueError("Add or remove the differing child nodes before applying their order.")
@@ -432,11 +511,11 @@ class SceneMerge:
         self.result.sections = [header, *ordered]
 
 
-def merge_selection(sources, source, entity, prop=None, name='scene.tscn', imports=None):
+def merge_selection(sources, source, entity, prop=None, name='scene.tscn', imports=None, node_matches=None, three_way=None):
     if not isinstance(name, str) or PurePosixPath(name).suffix.lower() not in ('.tscn', '.tres'):
         raise ValueError("Selective merging supports .tscn and .tres files.")
     try:
-        merger = SceneMerge(sources, source, imports)
+        merger = SceneMerge(sources, source, imports, node_matches, three_way)
         text, warnings = merger.apply(entity, prop)
         history = {**merger.prior_imports, **merger.imported}
         return text, warnings, [[kind, identity, target] for (kind, identity), target in history.items()]
