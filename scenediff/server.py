@@ -13,7 +13,7 @@ from .gitrepo import compare_git
 from .report import demo, render
 from .semantic import compare_file, compare_local, report
 from .matching import MatchError
-from .merge import merge_selection
+from .merge import NeedsConfirmation, merge_selection
 
 MAX_REQUEST = 32 * 1024 * 1024
 
@@ -110,9 +110,13 @@ def create_server(port=0, initial=None):
                 elif self.path == "/api/merge":
                     sources, source = data.get("sources"), data.get("source")
                     matches = data.get("node_matches") or []
-                    text, warnings, imports = merge_selection(sources, source, data.get("entity"), data.get("property"),
-                                                              data.get("name", "scene.tscn"), data.get("imports"),
-                                                              matches, bool(data.get("three_way")))
+                    try:
+                        text, warnings, imports = merge_selection(sources, source, data.get("entity"), data.get("property"),
+                                                                  data.get("name", "scene.tscn"), data.get("imports"),
+                                                                  matches, bool(data.get("three_way")), data.get("confirm") is True)
+                    except NeedsConfirmation as exc:
+                        self.send(409, json.dumps({"error": str(exc), "confirm": exc.losses}, ensure_ascii=True))
+                        return
                     merged = list(sources)
                     merged[3 - source] = text
                     payload = {"file": refresh_file(data, merged, matches),

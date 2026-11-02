@@ -1,6 +1,6 @@
 import unittest
 
-from scenediff.merge import merge_selection
+from scenediff.merge import ALL_PROPERTIES, NeedsConfirmation, merge_selection
 from scenediff.parser import node_path, parse, references, unquote
 from scenediff.semantic import compare_scene
 
@@ -9,8 +9,8 @@ def scene(props='', children='', resources=''):
     return f'[gd_scene format=3]\n{resources}\n[node name="World" type="Node3D"]\n{props}\n{children}\n'
 
 
-def apply(a, b, key='node:.', prop=None, source=1, base=None, name='scene.tscn'):
-    return merge_selection([base, a, b], source, key, prop, name)[0]
+def apply(a, b, key='node:.', prop=None, source=1, base=None, name='scene.tscn', confirm=False):
+    return merge_selection([base, a, b], source, key, prop, name, confirm=confirm)[0]
 
 
 def nodes(text):
@@ -61,14 +61,22 @@ class MergeTests(unittest.TestCase):
     def test_node_delete_removes_children_connections_editable(self):
         a=scene()
         b=scene(children='[node name="Enemy" type="Node" parent="."]\n[node name="Body" type="Node" parent="Enemy"]\n[connection signal="ready" from="Enemy/Body" to="." method="spawned"]\n[editable path="Enemy"]')
-        result=apply(a,b,'node:Enemy')
+        with self.assertRaises(NeedsConfirmation) as caught:
+            apply(a,b,'node:Enemy')
+        self.assertIn('node Enemy (only in the target)',caught.exception.losses)
+        self.assertIn('node Enemy/Body (only in the target)',caught.exception.losses)
+        self.assertTrue(any(l.startswith('signal ready') for l in caught.exception.losses))
+        result=apply(a,b,'node:Enemy',confirm=True)
         self.assertEqual(set(nodes(result)),{'.'})
         self.assertFalse(any(s.kind in ('connection','editable') for s in parse(result).sections))
 
     def test_subtree_replace_removes_target_only_children_and_retains_other_nodes(self):
         a=scene(children='[node name="Enemy" type="Node" parent="."]\nx = 2')
         b=scene(children='[node name="Enemy" type="Node" parent="."]\nx = 1\n[node name="Body" type="Node" parent="Enemy"]\n[node name="Friend" type="Node" parent="."]\ny = 4')
-        result=apply(a,b,'node:Enemy')
+        with self.assertRaises(NeedsConfirmation) as caught:
+            apply(a,b,'node:Enemy')
+        self.assertEqual(caught.exception.losses,['Enemy: x','node Enemy/Body (only in the target)'])
+        result=apply(a,b,'node:Enemy',confirm=True)
         self.assertEqual(set(nodes(result)),{'.','Enemy','Friend'})
         self.assertEqual(nodes(result)['Friend'].props,{'y':'4'})
 
@@ -103,7 +111,7 @@ class MergeTests(unittest.TestCase):
     def test_external_collision_and_reference_like_strings(self):
         a=scene('script = ExtResource("1")\ntext = "ExtResource(\\"1\\")"',resources='[ext_resource type="Script" path="res://a.gd" id="1"]')
         b=scene('script = ExtResource("1")',resources='[ext_resource type="Script" path="res://b.gd" id="1"]')
-        result,warnings,_=merge_selection([None,a,b],1,'node:.')
+        result,warnings,_=merge_selection([None,a,b],1,'node:.',ALL_PROPERTIES)
         self.assertEqual(nodes(result)['.'].props['text'],'"ExtResource(\\"1\\")"')
         self.assertNotEqual(nodes(result)['.'].props['script'],'ExtResource("1")')
         self.assertTrue(any('res://a.gd' in w for w in warnings))
@@ -240,6 +248,25 @@ class MergeTests(unittest.TestCase):
         child='\n[node name="P" type="Node3D" parent="."]\n\n[node name="Kid" type="Node3D" parent="P"]\n'
         with self.assertRaisesRegex(ValueError,'missing the parent of P/Kid: P'):
             apply(scene(),scene(children=child),'node:P/Kid',source=2)
+
+    def test_whole_root_replacement_is_refused(self):
+        with self.assertRaisesRegex(ValueError,'replace the entire scene'):
+            apply(scene('x = 1'),scene('x = 2',children='[node name="Hud" type="Node" parent="."]'))
+
+    def test_all_properties_keeps_children_and_other_edits(self):
+        a=scene('x = 2\ny = 1')
+        b=scene('x = 1\nz = 5',children='[node name="Hud" type="Node" parent="."]\nw = 1')
+        result=apply(a,b,prop=ALL_PROPERTIES)
+        root=nodes(result)['.']
+        self.assertEqual(root.props,{'x':'2','y':'1'})
+        self.assertEqual(root.attrs['name'],'"World"')
+        self.assertEqual(nodes(result)['Hud'].props,{'w':'1'})
+
+    def test_subtree_replacement_without_losses_needs_no_confirmation(self):
+        child='[node name="Enemy" type="Node" parent="."]\nx = {}'
+        base=scene(children=child.format(1))
+        result=apply(scene(children=child.format(2)),base,'node:Enemy',base=base)
+        self.assertEqual(nodes(result)['Enemy'].props,{'x':'2'})
 
 if __name__=='__main__':
     unittest.main()

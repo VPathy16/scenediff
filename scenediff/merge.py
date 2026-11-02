@@ -80,8 +80,21 @@ def _structure_problems(sections):
     return problems
 
 
+ALL_PROPERTIES = '*'
+
+
+class NeedsConfirmation(ValueError):
+    """Replacing a subtree would discard target-only nodes, edits or signals."""
+
+    def __init__(self, losses):
+        self.losses = losses
+        shown = "; ".join(losses[:8]) + (f"; and {len(losses) - 8} more" if len(losses) > 8 else "")
+        super().__init__(f"This replaces {len(losses)} thing{'s' if len(losses) != 1 else ''} that only the target has: {shown}.")
+
+
 class SceneMerge:
-    def __init__(self, sources, source, imports=None, node_matches=None, three_way=None):
+    def __init__(self, sources, source, imports=None, node_matches=None, three_way=None, confirm=False):
+        self.confirm = bool(confirm)
         if type(source) is not int or source not in (1, 2):
             raise ValueError("Choose source A (1) or B (2).")
         if not isinstance(sources, list) or len(sources) != 3:
@@ -238,6 +251,52 @@ class SceneMerge:
         self.result.sections = [s for s in self.result.sections if not touches(s)]
         return touches
 
+    def _copy_value(self, source, updated, prop):
+        attr = prop.startswith('@')
+        name = prop[1:] if attr else prop
+        source_values = source.attrs if attr else source.props
+        values = updated.attrs if attr else updated.props
+        if name in source_values:
+            values[name] = self._rewrite(source_values[name])
+        else:
+            values.pop(name, None)
+
+    def _losses(self, root, source_root, relocate):
+        """What replacing the target subtree at ``root`` would throw away."""
+        source_model, target_model = self.models[self.source_index], self.models[self.target_index]
+        base_model = self.models[0] if self.docs[0] is not None else None
+        losses = []
+        for section in self.result.sections:
+            if section.kind != 'node' or not _under(node_path(section), root):
+                continue
+            path = node_path(section)
+            key = 'node:' + self.node_maps[self.target_index].get(path, path)
+            if key not in source_model:
+                losses.append(f"node {path} (only in the target)")
+                continue
+            if source_root is None:
+                continue
+            ours, theirs = target_model[key]['canonical'], source_model[key]['canonical']
+            base = base_model.get(key, {}).get('canonical', {}) if base_model is not None else None
+            for prop in sorted(set(ours) | set(theirs)):
+                if prop in ('@parent', '@name') or ours.get(prop) == theirs.get(prop):
+                    continue
+                if base is not None and ours.get(prop) == base.get(prop):
+                    continue  # The target never changed it: nothing of the target's is lost.
+                losses.append(f"{path}: {prop.lstrip('@')}")
+        copied = set()
+        if source_root is not None:
+            for section in self.source.sections:
+                if section.kind == 'connection' and any(_under(unquote(section.attrs.get(k, '')), source_root) for k in ('from', 'to')):
+                    copied.add((unquote(section.attrs.get('signal', '')), relocate(unquote(section.attrs.get('from', ''))),
+                                relocate(unquote(section.attrs.get('to', ''))), unquote(section.attrs.get('method', ''))))
+        for section in self.result.sections:
+            if section.kind == 'connection' and any(_under(unquote(section.attrs.get(k, '')), root) for k in ('from', 'to')):
+                ident = tuple(unquote(section.attrs.get(k, '')) for k in ('signal', 'from', 'to', 'method'))
+                if ident not in copied:
+                    losses.append(f"signal {ident[0]} from {ident[1]} to {ident[2]}")
+        return losses
+
     def _target_path(self, source_path):
         """Where a source node is, or would be placed, in the target."""
         if source_path == '.':
@@ -287,6 +346,16 @@ class SceneMerge:
         root = node_path(target) if target is not None else self._target_path(source_root)
         if source is None and root == '.':
             raise ValueError("The root node cannot be removed from a scene.")
+        def relocate(path):
+            # A path inside the copied subtree keeps its place relative to the target node.
+            if source_root == '.' or source_root is None or not _under(path, source_root):
+                return self._target_path(path) if source_root not in ('.', None) else path
+            return root + path[len(source_root):]
+
+        if not self.confirm:
+            losses = self._losses(root, source_root, relocate)
+            if losses:
+                raise NeedsConfirmation(losses)
         old = [s for s in self.result.sections if s.kind == 'node' and _under(node_path(s), root)]
         index = next((i for i, s in enumerate(self.result.sections) if s in old), None)
         self.result.sections = [s for s in self.result.sections if s not in old]
@@ -296,12 +365,6 @@ class SceneMerge:
         nodes = [s for s in self.source.sections if s.kind == 'node' and _under(node_path(s), source_root)]
         if target is None:
             self._check_not_moved(nodes)
-
-        def relocate(path):
-            # A path inside the copied subtree keeps its place relative to the target node.
-            if source_root == '.' or not _under(path, source_root):
-                return self._target_path(path) if source_root != '.' else path
-            return root + path[len(source_root):]
 
         if index is None:
             # Place additions before the next source sibling already present in the target.
@@ -365,6 +428,20 @@ class SceneMerge:
             self._copy_order(key)
         elif source is None and target is None:
             raise ValueError("The selected entity does not exist in A or B.")
+        elif prop == ALL_PROPERTIES:
+            if not source or not target:
+                raise ValueError("Apply the whole node first; it is absent in one version.")
+            if target.kind != 'node':
+                raise ValueError("All properties can be copied for nodes only.")
+            names = [k for k in {**self.models[self.source_index][key]['properties'], **self.models[self.target_index][key]['properties']}
+                     if k not in PROTECTED['node']]
+            if not names:
+                raise ValueError("This node has no properties to copy.")
+            self._seed_resource(source, target)
+            updated = copy.deepcopy(target)
+            for name in names:
+                self._copy_value(source, updated, name)
+            self._replace(target, updated)
         elif prop is not None:
             if not source or not target:
                 raise ValueError("Apply the whole node or resource first; it is absent in one version.")
@@ -374,14 +451,7 @@ class SceneMerge:
                 raise ValueError("The selected property does not exist.")
             self._seed_resource(source, target)
             updated = copy.deepcopy(target)
-            attr = prop.startswith('@')
-            name = prop[1:] if attr else prop
-            source_values = source.attrs if attr else source.props
-            values = updated.attrs if attr else updated.props
-            if name in source_values:
-                values[name] = self._rewrite(source_values[name])
-            else:
-                values.pop(name, None)
+            self._copy_value(source, updated, prop)
             if target.kind == 'ext_resource' and prop in ('@path', '@uid'):
                 # Godot resolves a UID before its path. Keep these selectors together.
                 for selector in ('path', 'uid'):
@@ -392,6 +462,10 @@ class SceneMerge:
                 self.warnings.append('External resource path and UID were copied together. Ensure that asset exists in the target project.')
             self._replace(target, updated)
         elif (source or target).kind == 'node':
+            if source is not None and target is not None and node_path(target) == '.':
+                raise ValueError("Applying the whole root node would replace the entire scene, including everything only "
+                                 "the target has. Use “All properties of this node” to copy the root's own settings, and "
+                                 "apply child nodes separately.")
             self._copy_node(key, source, target)
         elif key == 'header':
             raise ValueError("Copy individual metadata properties; preserve the target document identity and format.")
@@ -511,11 +585,11 @@ class SceneMerge:
         self.result.sections = [header, *ordered]
 
 
-def merge_selection(sources, source, entity, prop=None, name='scene.tscn', imports=None, node_matches=None, three_way=None):
+def merge_selection(sources, source, entity, prop=None, name='scene.tscn', imports=None, node_matches=None, three_way=None, confirm=False):
     if not isinstance(name, str) or PurePosixPath(name).suffix.lower() not in ('.tscn', '.tres'):
         raise ValueError("Selective merging supports .tscn and .tres files.")
     try:
-        merger = SceneMerge(sources, source, imports, node_matches, three_way)
+        merger = SceneMerge(sources, source, imports, node_matches, three_way, confirm)
         text, warnings = merger.apply(entity, prop)
         history = {**merger.prior_imports, **merger.imported}
         return text, warnings, [[kind, identity, target] for (kind, identity), target in history.items()]

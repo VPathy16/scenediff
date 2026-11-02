@@ -291,17 +291,20 @@
     const row = e?.rows.find(r => r.property === selectedProperty);
     const protectedProps = {node:["@name","@parent","@unique_id","@type","@instance"], gd_scene:["@format","@uid"], gd_resource:["@format","@uid","@type"]};
     const canProperty = row && e.exists[1] && e.exists[2] && !(protectedProps[e.kind] || []).includes(row.property);
-    const canEntity = e && !["gd_scene","gd_resource"].includes(e.kind);
+    const isRoot = e?.kind === "node" && e.key === "node:.";
+    const canEntity = e && !["gd_scene","gd_resource"].includes(e.kind) && !(isRoot && e.exists[1] && e.exists[2]);
+    const canAll = e?.kind === "node" && e.exists[1] && e.exists[2];
     const buttons = scope => [1,2].map(source => {
       const target = 3-source;
-      const disabled = merging || f.sources[target] === null || (scope === "property" && !canProperty) || (scope === "entity" && (!canEntity || (e.kind === "node" && e.path === "." && !e.exists[source])));
+      const disabled = merging || f.sources[target] === null || (scope === "property" && !canProperty) || (scope === "all" && !canAll) || (scope === "entity" && (!canEntity || (e.kind === "node" && e.path === "." && !e.exists[source])));
       return `<button data-apply="${source}" data-scope="${scope}" ${disabled ? "disabled" : ""}>Apply ${source === 1 ? "A → B" : "B → A"}</button>`;
     }).join("");
     let html = "";
     if (supported && boot.live && e) {
       html = `<div class="resolution-card"><h3>Apply changes to a scene</h3><p>Start with the target version and copy only what you select. Download the result when you are ready.</p>`;
       if (row) html += `<div class="merge-scope">Selected property: <strong>${escape(row.property.replace(/^@/,""))}</strong></div><div class="merge-actions">${buttons("property")}</div>`;
-      if (canEntity) html += `<div class="merge-scope">${e.kind === "node" ? "Whole node and children" : "Whole " + escape(kindLabels[e.kind] || e.kind)}</div><div class="merge-actions">${buttons("entity")}</div><p>${e.kind === "node" ? "Replaces this target subtree, including its signal connections, with the source subtree. An absent source removes the target subtree." : "Copies the selected item. An absent source removes it when no references remain."}</p>`;
+      if (canAll) html += `<div class="merge-scope">All properties of this node</div><div class="merge-actions">${buttons("all")}</div><p>Copies every property of this node and keeps its children, name and place in the scene.${isRoot ? " To bring over child nodes, select them in the outline." : ""}</p>`;
+      if (canEntity) html += `<div class="merge-scope">${e.kind === "node" ? "Whole node and children" : "Whole " + escape(kindLabels[e.kind] || e.kind)}</div><div class="merge-actions">${buttons("entity")}</div><p>${e.kind === "node" ? "Replaces this target subtree, including its signal connections, with the source subtree. An absent source removes the target subtree. You are asked to confirm before anything only the target has is removed." : "Copies the selected item. An absent source removes it when no references remain."}</p>`;
       if (["sub_resource","ext_resource"].includes(e.kind)) html += '<p>Editing this resource affects every node that references it in the target.</p>';
       html += '</div>';
     } else if (supported && !boot.live) {
@@ -317,16 +320,22 @@
     $("new-comparison").disabled = merging;
     $("save-report").disabled = merging;
   }
-  async function applyMerge(source, scope) {
+  async function applyMerge(source, scope, confirmed = false) {
     if (merging) return;
     const index = fileIndex, f = file(), e = entity();
     if (!f || !e || !boot.live) return;
-    const property = scope === "property" ? selectedProperty : null;
+    const property = scope === "property" ? selectedProperty : scope === "all" ? "*" : null;
     const previous = {data, decisions:{...decisions}, index, entityKey, selectedProperty};
     merging = true; mergeError = ""; renderMerge();
     try {
-      const response = await fetch('/api/merge', {method:'POST', headers:{'Content-Type':'application/json','X-SceneDiff-Token':boot.token}, body:JSON.stringify({...refreshRequest(f), source, entity:e.key, property, imports:f.merge_imports?.[source] || []})});
+      const response = await fetch('/api/merge', {method:'POST', headers:{'Content-Type':'application/json','X-SceneDiff-Token':boot.token}, body:JSON.stringify({...refreshRequest(f), source, entity:e.key, property, confirm:confirmed, imports:f.merge_imports?.[source] || []})});
       const result = await response.json();
+      if (response.status === 409 && result.confirm) {
+        const list = result.confirm.slice(0, 12).map(item => "• " + item).join("\n") + (result.confirm.length > 12 ? `\n…and ${result.confirm.length - 12} more` : "");
+        merging = false;
+        if (window.confirm(`Replacing ${e.label} with the ${source === 1 ? "A" : "B"} version removes what only ${source === 1 ? "B" : "A"} has:\n\n${list}\n\nReplace it anyway? (Undo last apply can restore it.)`)) return await applyMerge(source, scope, true);
+        return;
+      }
       if (!response.ok) throw Error(result.error || 'Merge failed');
       const updated = result.file;
       updated.merge_imports = {...f.merge_imports, [source]:result.merge.imports};
