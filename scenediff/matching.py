@@ -10,9 +10,13 @@ from __future__ import annotations
 import hashlib
 import json
 from bisect import bisect_left
+from difflib import SequenceMatcher
 from collections import Counter
 
 from .parser import Document, ParseError, canonical, node_path, references, unquote
+
+
+CLEAR_MARGIN = 10  # points a suggestion must lead its competitors by to count as clear
 
 
 class MatchError(ValueError):
@@ -102,9 +106,19 @@ def _evidence(old_path, new_path, a, b):
     if a["children"] and a["children"] == b["children"]:
         reasons.append("Same relative child structure")
         score += 30
-    if old_path.rsplit("/", 1)[-1] == new_path.rsplit("/", 1)[-1]:
+    old_name, new_name = old_path.rsplit("/", 1)[-1], new_path.rsplit("/", 1)[-1]
+    if old_name == new_name:
         reasons.append("Same name under a different parent")
         score += 20
+    elif old_name in new_name or new_name in old_name:
+        # e.g. icon → icon_grp: a rename that keeps the old name.
+        reasons.append(f"Name kept within the new name ({old_name} → {new_name})")
+        score += 30
+    else:
+        ratio = SequenceMatcher(None, old_name, new_name).ratio()
+        if ratio >= 0.6:
+            reasons.append(f"Similar name ({old_name} → {new_name})")
+            score += round(20 * ratio)
     if score < 30:
         return None
     return {"score": score, "reasons": reasons}
@@ -241,11 +255,25 @@ def identities(docs, confirmed=None, *, three_way=True):
                        and not (s["base_path"] in removed_roots and s["target_path"] in roots_new)]
         elif rest_old:
             warnings.append(f"{side}: suggestions for nodes moved out of their parent were skipped above 10,000 candidate pairs; use explicit node matches.")
-        by_old = Counter(s["base_path"] for s in scored)
-        by_new = Counter(s["target_path"] for s in scored)
+        # A suggestion is clear when it is the best for both of its nodes by a margin.
+        best_old, best_new = {}, {}
         for suggestion in scored:
-            suggestion["ambiguous"] = by_old[suggestion["base_path"]] > 1 or by_new[suggestion["target_path"]] > 1
-        candidates.extend(sorted(scored, key=lambda s: (-s["score"], s["base_path"], s["target_path"]))[:100])
+            best_old.setdefault(suggestion["base_path"], []).append(suggestion["score"])
+            best_new.setdefault(suggestion["target_path"], []).append(suggestion["score"])
+        def clear(suggestion):
+            for scores in (best_old[suggestion["base_path"]], best_new[suggestion["target_path"]]):
+                others = sorted(scores, reverse=True)
+                others.remove(suggestion["score"])
+                if suggestion["score"] < max(scores) or (others and others[0] > suggestion["score"] - CLEAR_MARGIN):
+                    return False
+            return True
+        for suggestion in scored:
+            suggestion["ambiguous"] = not clear(suggestion)
+        # Alternatives that lose to a clear match for one of their nodes are just noise.
+        taken = {path for s in scored if not s["ambiguous"] for path in (("old", s["base_path"]), ("new", s["target_path"]))}
+        scored = [s for s in scored if not s["ambiguous"]
+                  or (("old", s["base_path"]) not in taken and ("new", s["target_path"]) not in taken)]
+        candidates.extend(sorted(scored, key=lambda s: (s["ambiguous"], -s["score"], s["base_path"], s["target_path"]))[:100])
         if len(scored) > 100:
             warnings.append(f"{side}: showing the first 100 rename/move suggestions; narrow the comparison for more.")
     if accepted:

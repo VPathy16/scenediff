@@ -91,5 +91,18 @@ class MovedNodeTests(unittest.TestCase):
         self.assertEqual(order, ["Box/Icon", "Box/Two", "Box/One"])
 
 
+    def test_suffix_renames_of_similar_siblings_are_clear(self):
+        # Similar sibling groups renamed with a suffix (icon -> icon_grp), as in real UI scenes.
+        def icons(suffix):
+            out = '[gd_scene format=3]\n\n[node name="root" type="Control"]\n'
+            for i, side in enumerate(["front", "left", "right", "rear"]):
+                out += f'\n[node name="cam_{side}_icon{suffix}" type="Control" parent="."]\nlayout_mode = 3\noffset_left = {i}.0\nmouse_filter = 2\n'
+            return out
+        suggestions = compare_file("s.tscn", None, icons(""), icons("_grp"), three_way=False)["match_suggestions"]
+        self.assertEqual(sorted((s["base_path"], s["target_path"]) for s in suggestions),
+                         [(f"cam_{x}_icon", f"cam_{x}_icon_grp") for x in ("front", "left", "rear", "right")])
+        self.assertFalse(any(s["ambiguous"] for s in suggestions))
+        self.assertTrue(all(any(r.startswith("Name kept within the new name") for r in s["reasons"]) for s in suggestions))
+
 if __name__ == "__main__":
     unittest.main()
