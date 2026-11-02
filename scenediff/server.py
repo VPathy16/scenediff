@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 from .gitrepo import compare_git
 from .report import demo, render
-from .semantic import compare_file, report
+from .semantic import compare_file, compare_local, report
 from .merge import merge_selection
 
 MAX_REQUEST = 32 * 1024 * 1024
@@ -80,15 +80,12 @@ def create_server(port=0, initial=None):
                     payload = report([item], ["Base", "A", "B"], three_way=three, context={"source": "files"})
                     payload["merge"] = {"target": 3 - source, "warnings": warnings, "imports": imports}
                 elif self.path == "/api/files":
-                    for key in ("left", "right"):
-                        if not isinstance(data.get(key), str):
-                            raise ValueError(f"Missing {key} file contents")
-                    if data.get("base") is not None and not isinstance(data["base"], str):
-                        raise ValueError("Invalid base file contents")
-                    path = str(data.get("name", "scene.tscn"))
-                    three = data.get("base") is not None
-                    item = compare_file(path, data.get("base"), data["left"], data["right"], three_way=three)
-                    payload = report([item], ["Base", "A", "B"], three_way=three, context={"source": "files"})
+                    if not isinstance(data.get("left"), str):
+                        raise ValueError("Missing left file contents")
+                    for key in ("base", "right"):
+                        if data.get(key) is not None and not isinstance(data[key], str):
+                            raise ValueError(f"Invalid {key} file contents")
+                    payload = compare_local(str(data.get("name", "scene.tscn")), data.get("base"), data["left"], data.get("right"))
                 else:
                     self.send(404, '{"error":"Not found"}')
                     return
