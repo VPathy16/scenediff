@@ -3,7 +3,7 @@
   const boot = JSON.parse(document.getElementById("boot").textContent);
   let data = boot.report;
   let fileIndex = 0, entityKey = null, tab = "properties", selectedProperty = null;
-  let query = "", conflictsOnly = false, showUnchanged = false, mode = "git", rawMode = "diff";
+  let query = "", statusFilter = "all", showUnchanged = false, mode = "git", rawMode = "diff";
   let decisions = data?.review?.decisions || {};
   let mergeHistory = [], merging = false, mergeError = "";
   const $ = id => document.getElementById(id);
@@ -50,13 +50,25 @@
   function selectEntity(key) {
     entityKey = key; selectedProperty = null; tab = "properties"; render();
   }
+  // Outline filter: every status maps to one of these groups.
+  const filters = [["all","All"],["added","Added"],["modified","Modified"],["removed","Removed"],["conflict","Conflict"],["unchanged","Unchanged"]];
+  const category = item => { const s = changedLabel(item); return ["added","removed","conflict","unchanged"].includes(s) ? s : "modified"; };
+  const matchesFilter = item => statusFilter === "all" || category(item) === statusFilter;
+  const matchesQuery = e => !query || (e.label + " " + e.path).toLowerCase().includes(query);
   function visibleEntity(e) {
-    return (!conflictsOnly || e.status === "conflict") && (!query || (e.label + " " + e.path).toLowerCase().includes(query));
+    return matchesFilter(e) && matchesQuery(e);
+  }
+  function renderFilter() {
+    const entities = file()?.entities || [];
+    const count = key => key === "all" ? entities.length : entities.filter(e => category(e) === key).length;
+    $("status-filter").innerHTML = filters.map(([key,label]) => `<button type="button" data-filter="${key}" class="${statusFilter === key ? "active" : ""}" aria-pressed="${statusFilter === key}">${key === "all" ? "" : `<i class="dot ${key}"></i>`}${label}<small>${count(key)}</small></button>`).join("");
+    $("status-filter").querySelectorAll("[data-filter]").forEach(button => button.onclick = () => { statusFilter = button.dataset.filter; selectedProperty = null; render(); });
   }
   function renderSidebar() {
+    renderFilter();
     $("file-count").textContent = data.files.length;
     $("file-list").innerHTML = data.files.map((f,i) => {
-      if (conflictsOnly && f.status !== "conflict") return "";
+      if (statusFilter !== "all" && category(f) !== statusFilter && !f.entities.some(matchesFilter)) return "";
       if (query && !f.path.toLowerCase().includes(query) && !f.entities.some(visibleEntity)) return "";
       const name = f.path.split("/").pop();
       const icon = f.kind === "scene" ? "▧" : f.kind === "resource" ? "◇" : f.kind === "binary" ? "◩" : "{ }";
@@ -71,12 +83,20 @@
       ["STRUCTURE & SIGNALS", entities.filter(e => !["node","sub_resource","ext_resource","resource"].includes(e.kind))]
     ];
     $("scene-tree").innerHTML = groups.map(([title,items]) => {
-      items = items.filter(visibleEntity);
-      if (!items.length) return "";
+      const shown = items.filter(visibleEntity);
+      if (!shown.length) return "";
+      const context = new Set();
+      if (statusFilter !== "all" && !title) for (const e of shown) {
+        const parts = e.path === "." ? [] : e.path.split("/");
+        context.add(".");
+        for (let i = 1; i < parts.length; i++) context.add(parts.slice(0, i).join("/"));
+      }
+      const visible = new Set(shown);
+      items = items.filter(e => visible.has(e) || (e.kind === "node" && context.has(e.path)));
       return (title ? `<div class="tree-group">${title}</div>` : "") + items.map(e => {
         const indent = e.kind === "node" && e.path !== "." ? Math.min(e.path.split("/").length, 5)*13 : 0;
         const name = e.kind === "node" ? e.label.split("/").pop() : e.label;
-        return `<button class="tree-row ${e.key === entityKey ? "active" : ""}" data-entity="${escape(e.key)}" style="padding-left:${10+indent}px" title="${escape(e.label)}" aria-pressed="${e.key === entityKey}"><span class="tree-icon">${e.kind === "node" ? "◇" : e.kind === "connection" ? "ϟ" : "▧"}</span><span class="tree-name">${escape(name)}</span><i class="dot ${changedLabel(e)}" aria-label="${escape(labels[e.status])}"></i></button>`;
+        return `<button class="tree-row ${e.key === entityKey ? "active" : ""} ${visible.has(e) ? "" : "context"}" data-entity="${escape(e.key)}" style="padding-left:${10+indent}px" title="${escape(e.label)}" aria-pressed="${e.key === entityKey}"><span class="tree-icon">${e.kind === "node" ? "◇" : e.kind === "connection" ? "ϟ" : "▧"}</span><span class="tree-name">${escape(name)}</span><i class="dot ${changedLabel(e)}" aria-label="${escape(labels[e.status])}"></i></button>`;
       }).join("");
     }).join("") || `<p class="small muted" style="padding:10px">${entities.length ? "No entities match this filter." : "Open a scene or resource to explore its structure."}</p>`;
     $("scene-tree").querySelectorAll("[data-entity]").forEach(button => button.onclick = () => selectEntity(button.dataset.entity));
@@ -95,10 +115,10 @@
   function renderProperties() {
     const e = entity();
     if (!e) return empty("Choose a node or resource", "Select an item in the scene outline to inspect its properties.");
-    const rows = e.rows.filter(row => (showUnchanged || row.status !== "unchanged") && (!conflictsOnly || row.status === "conflict"));
+    const rows = e.rows.filter(row => statusFilter === "conflict" ? row.status === "conflict" : statusFilter === "unchanged" ? row.status === "unchanged" : showUnchanged || row.status !== "unchanged");
     if (!selectedProperty) selectedProperty = e.structural_conflict ? "$structure" : rows.find(r => r.status === "conflict")?.property || rows[0]?.property;
     let html = e.structural_conflict ? `<div class="inline-note">Structural conflict: ${escape(e.structural_conflict)}. Review the node or resource as a whole, including its dependencies.</div>` : "";
-    if (!rows.length) return html + empty("No matching property changes", showUnchanged ? "Try turning off the conflict filter." : "Enable “Show unchanged” to inspect every serialized property.", "✓");
+    if (!rows.length) return html + empty("No matching property changes", showUnchanged || statusFilter !== "all" ? "Try another filter above the outline." : "Enable “Show unchanged” to inspect every serialized property.", "✓");
     const cols = data.three_way ? [0,1,2] : [1,2];
     html += `<table class="properties"><thead><tr><th>PROPERTY</th>${cols.map(c => `<th>${["BASE","A · LEFT","B · RIGHT"][c]}</th>`).join("")}</tr></thead><tbody>`;
     html += rows.map(row => `<tr tabindex="0" role="button" aria-label="Review ${escape(row.property)}" class="${selectedProperty === row.property ? "selected" : ""}" data-property="${escape(row.property)}"><td class="property-name">${escape(row.property.replace(/^@/,""))}${decisions[decisionKey(file(),e,row.property)] ? ' <span title="Decision recorded" style="color:var(--purple)">✓</span>' : ""}</td>${cols.map(c => {
@@ -265,7 +285,7 @@
           conflicts:files.reduce((n,f) => n + (f.entities.length ? f.entities.filter(e => e.status === 'conflict').length : Number(f.status === 'conflict')),0), warnings:files.reduce((n,f) => n+f.warnings.length,0)}};
       decisions = Object.fromEntries(Object.entries(decisions).filter(([,d]) => d.file !== f.path));
       fileIndex=index; entityKey=updated.entities.some(item => item.key === e.key) ? e.key : updated.entities[0]?.key;
-      selectedProperty=null; tab='properties'; conflictsOnly=false; $("conflicts-only").checked=false;
+      selectedProperty=null; tab='properties'; statusFilter="all";
       toast(`Applied ${source === 1 ? 'A → B' : 'B → A'}. Download merged ${source === 1 ? 'B' : 'A'} to save it.`);
     } catch (error) { mergeError=error.message; }
     finally { merging=false; render(); }
@@ -309,7 +329,6 @@
     $("resolution").scrollIntoView({behavior:"smooth",block:"nearest"});
   };
   $("search").oninput = event => { query=event.target.value.toLowerCase(); renderSidebar(); };
-  $("conflicts-only").onchange = event => { conflictsOnly=event.target.checked; render(); };
   $("show-unchanged").onchange = event => { showUnchanged=event.target.checked; render(); };
   document.querySelectorAll("[data-tab]").forEach(button => button.onclick = () => { tab=button.dataset.tab; render(); });
   document.querySelectorAll("[data-mode]").forEach(button => button.onclick = () => {
@@ -339,7 +358,7 @@
       }
       const response=await fetch(`/api/${mode}`,{method:"POST",headers:{"Content-Type":"application/json","X-SceneDiff-Token":boot.token},body:JSON.stringify(payload)});
       const result=await response.json(); if (!response.ok) throw Error(result.error || "Comparison failed");
-      data=result; decisions={}; mergeHistory=[]; mergeError=""; query=""; $("search").value=""; conflictsOnly=false; $("conflicts-only").checked=false;
+      data=result; decisions={}; mergeHistory=[]; mergeError=""; query=""; $("search").value=""; statusFilter="all";
       selectFile(0); $("compare-dialog").close();
     } catch (error) { $("form-error").textContent=error.message; }
     finally { $("submit-compare").disabled=false; $("submit-compare").textContent="Compare changes →"; }

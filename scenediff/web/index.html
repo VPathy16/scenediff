@@ -28,11 +28,12 @@
       <label class="search"><span>⌕</span><input id="search" type="search" placeholder="Find a file, node, or resource…" aria-label="Search files and entities"></label>
       <div id="file-list" class="file-list"></div>
       <div class="sidebar-head tree-heading"><span class="eyebrow">SCENE OUTLINE</span><span id="entity-count" class="count"></span></div>
+      <div id="status-filter" class="status-filter" role="group" aria-label="Show items by change type"></div>
       <div id="scene-tree" class="scene-tree"></div>
       <div class="legend"><span><i class="dot added"></i> Added</span><span><i class="dot modified"></i> Changed</span><span><i class="dot conflict"></i> Conflict</span></div>
     </aside>
     <section class="content">
-      <div class="summarybar"><div id="summary"></div><label class="toggle"><input id="conflicts-only" type="checkbox"> Conflicts only</label></div>
+      <div class="summarybar"><div id="summary"></div></div>
       <div class="content-head"><div class="breadcrumb" id="breadcrumb"></div><h1 id="entity-title"></h1><div id="entity-subtitle" class="muted"></div></div>
       <div class="tabs" role="tablist" aria-label="Comparison views">
         <button role="tab" data-tab="properties" aria-selected="true">▤ &nbsp;Properties</button><button role="tab" data-tab="resources">◇ &nbsp;Resources</button><button role="tab" data-tab="signals">ϟ &nbsp;Signals</button><button role="tab" data-tab="raw">⌘ &nbsp;Raw diff</button>
