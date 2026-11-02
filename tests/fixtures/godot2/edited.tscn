@@ -1,0 +1,19 @@
+[gd_scene load_steps=3 format=1]
+
+[ext_resource path="res://player.gd" type="Script" id=1]
+
+[sub_resource type="RectangleShape2D" id=1]
+custom_solver_bias = 0.0
+extents = Vector2( 10, 20 )
+
+[node name="World" type="Node2D"]
+
+[node name="Actors" type="Node2D" parent="."]
+
+[node name="Player" type="KinematicBody2D" parent="."]
+script/script = ExtResource( 1 )
+transform/pos = Vector2( 0, 0 )
+speed = 300
+
+[node name="Collision" type="CollisionShape2D" parent="Player"]
+shape = SubResource( 1 )

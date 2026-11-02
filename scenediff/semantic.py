@@ -9,6 +9,7 @@ from collections import defaultdict
 
 from .conflicts import has_conflict_markers, split_conflicts
 from .parser import Document, ParseError, canonical, node_path, parse, references, unquote
+from .matching import identities
 
 
 def _resources(doc: Document | None, kind: str):
@@ -23,7 +24,7 @@ def _resources(doc: Document | None, kind: str):
     return result
 
 
-def _usage(doc: Document | None) -> dict[str, set[str]]:
+def _usage(doc: Document | None, node_paths=None) -> dict[str, set[str]]:
     """Anchor subresources to their reference slots, including nested resources."""
     usage = defaultdict(set)
     subs = _resources(doc, "sub_resource")
@@ -43,18 +44,20 @@ def _usage(doc: Document | None) -> dict[str, set[str]]:
     for section in doc.sections:
         if section.kind in {"node", "resource"}:
             anchor = node_path(section) if section.kind == "node" else "resource"
+            if section.kind == "node" and node_paths:
+                anchor = node_paths.get(anchor, anchor)
             for prop, value in {**section.attrs, **section.props}.items():
                 visit(value, f"{anchor}/{prop}", set())
     return usage
 
 
-def resource_maps(docs: list[Document | None]):
+def resource_maps(docs: list[Document | None], node_maps=None):
     maps: list[dict[tuple[str, str], str]] = []
     known = {"ExtResource": [], "SubResource": []}
     warnings: list[str] = []
     for version, doc in enumerate(docs):
         mapping: dict[tuple[str, str], str] = {}
-        usage = _usage(doc)
+        usage = _usage(doc, node_maps[version] if node_maps else None)
         for kind, section_kind in [("ExtResource", "ext_resource"), ("SubResource", "sub_resource")]:
             used_keys = set()
             for identity, section in _resources(doc, section_kind).items():
@@ -89,10 +92,11 @@ def resource_maps(docs: list[Document | None]):
     return maps, warnings
 
 
-def model(doc: Document | None, mapping: dict) -> dict:
+def model(doc: Document | None, mapping: dict, node_paths=None) -> dict:
     entities = {}
     if not doc:
         return entities
+    node_paths = node_paths or {}
     root_name = next((unquote(s.attrs.get("name", '"Scene"')) for s in doc.sections if s.kind == "node" and "parent" not in s.attrs), "Scene")
     orders = defaultdict(list)
     usage = _usage(doc)
@@ -104,7 +108,7 @@ def model(doc: Document | None, mapping: dict) -> dict:
         kind = section.kind
         if kind == "node":
             path = node_path(section)
-            key = f"node:{path}"
+            key = f"node:{node_paths.get(path, path)}"
             label = root_name if path == "." else f"{root_name}/{path}"
             if "parent" in attrs:
                 orders[unquote(attrs["parent"])].append(path)
@@ -143,11 +147,18 @@ def model(doc: Document | None, mapping: dict) -> dict:
                          "line": section.line, "properties": props,
                          "canonical": {k: canonical(v, mapping) for k, v in props.items()},
                          "used_by": users}
+        if kind == "node":
+            for attr in ("parent", "owner"):
+                if attr in attrs:
+                    reference = unquote(attrs[attr])
+                    if reference in node_paths:
+                        entities[key]["canonical"]["@" + attr] = canonical(json.dumps(node_paths[reference]))
     for parent, children in orders.items():
-        key = f"order:{parent}"
+        key = f"order:{node_paths.get(parent, parent)}"
         value = json.dumps(children, ensure_ascii=False)
+        logical_order = json.dumps([node_paths.get(child, child) for child in children], ensure_ascii=False)
         entities[key] = {"key": key, "kind": "order", "label": f"Child order · {parent}", "path": parent,
-                         "line": None, "properties": {"children": value}, "canonical": {"children": value}, "used_by": []}
+                         "line": None, "properties": {"children": value}, "canonical": {"children": logical_order}, "used_by": []}
     return entities
 
 
@@ -171,11 +182,13 @@ def _fingerprint(entity):
     return None if entity is None else entity["canonical"]
 
 
-def compare_scene(base: str | None, left: str | None, right: str | None, *, three_way=True) -> dict:
+def compare_scene(base: str | None, left: str | None, right: str | None, *, three_way=True, node_matches=None) -> dict:
     texts = [base, left, right]
     docs = [parse(t) if t is not None else None for t in texts]
-    mappings, warnings = resource_maps(docs)
-    models = [model(d, m) for d, m in zip(docs, mappings)]
+    node_maps, confirmed, suggestions, match_options, match_warnings = identities(docs, node_matches, three_way=three_way)
+    mappings, warnings = resource_maps(docs, node_maps)
+    warnings.extend(match_warnings)
+    models = [model(d, m, n) for d, m, n in zip(docs, mappings, node_maps)]
     for version, (doc, mapping) in enumerate(zip(docs, mappings)):
         if not doc:
             continue
@@ -212,12 +225,12 @@ def compare_scene(base: str | None, left: str | None, right: str | None, *, thre
             "status": overall, "exists": exists, "rows": rows,
             "used_by": [v["used_by"] if v else [] for v in versions],
             "lines": [v["line"] if v else None for v in versions],
+            "paths": [v["path"] if v else None for v in versions],
             "structural_conflict": "delete/edit" if existence_conflict else "add/add" if addition_conflict else None,
             "notes": [],
         })
 
     # Ancestor removal conflicts with descendant additions/edits on the other side.
-    by_key = {e["key"]: e for e in entities}
     if three_way:
         for entity in entities:
             if entity["kind"] != "node" or not entity["exists"][0]:
@@ -225,9 +238,11 @@ def compare_scene(base: str | None, left: str | None, right: str | None, *, thre
             for removed, edited in [(1, 2), (2, 1)]:
                 if entity["exists"][removed] or not entity["exists"][edited]:
                     continue
-                prefix = entity["path"] + "/"
+                parent_path = entity["paths"][edited]
+                prefix = parent_path + "/"
                 descendants = [e for e in entities if e["kind"] == "node" and e is not entity
-                               and (entity["path"] == "." or e["path"].startswith(prefix))]
+                               and e["paths"][edited] is not None
+                               and (parent_path == "." or e["paths"][edited].startswith(prefix))]
                 for child in descendants:
                     if _fingerprint(models[0].get(child["key"])) != _fingerprint(models[edited].get(child["key"])) and child["exists"][edited]:
                         entity["status"] = child["status"] = "conflict"
@@ -239,14 +254,18 @@ def compare_scene(base: str | None, left: str | None, right: str | None, *, thre
     added_nodes = [e for e in entities if e["kind"] == "node" and not e["exists"][0]]
     if removed_nodes and added_nodes:
         warnings.append("Nodes were both added and removed. Possible renames or moves are shown separately; review node paths and references.")
-    return {"entities": entities, "warnings": list(dict.fromkeys(warnings)), "three_way": three_way}
+    for entity in entities:
+        if entity["kind"] == "node" and len({p for p in entity["paths"] if p is not None}) > 1:
+            entity["notes"].append("Confirmed node identity across different paths. Check references and child order before applying a merge.")
+    return {"entities": entities, "warnings": list(dict.fromkeys(warnings)), "three_way": three_way,
+            "node_matches": confirmed, "match_suggestions": suggestions, "match_options": match_options}
 
 
 def raw_diff(left: str | None, right: str | None, left_label="A", right_label="B") -> str:
     return "".join(difflib.unified_diff((left or "").splitlines(True), (right or "").splitlines(True), fromfile=left_label, tofile=right_label))
 
 
-def compare_file(path: str, base: str | None, left: str | None, right: str | None, *, three_way=True, binary=False) -> dict:
+def compare_file(path: str, base: str | None, left: str | None, right: str | None, *, three_way=True, binary=False, node_matches=None) -> dict:
     status = classify(base, left, right, three_way)
     result = {"path": path, "status": status, "kind": "binary" if binary else "text", "entities": [],
               "warnings": [], "sources": [base, left, right], "raw_diff": "" if binary else raw_diff(left, right),
@@ -255,7 +274,7 @@ def compare_file(path: str, base: str | None, left: str | None, right: str | Non
         result["warnings"] = ["Binary asset: fingerprints are compared; contents require the appropriate editor."]
     elif path.lower().endswith((".tscn", ".tres")):
         try:
-            semantic = compare_scene(base, left, right, three_way=three_way)
+            semantic = compare_scene(base, left, right, three_way=three_way, node_matches=node_matches)
             result.update(semantic)
             result["kind"] = "scene" if path.lower().endswith(".tscn") else "resource"
             changed = [e for e in result["entities"] if e["status"] != "unchanged"]
