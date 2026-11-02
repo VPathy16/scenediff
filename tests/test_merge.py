@@ -209,5 +209,25 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(list(nodes(apply(scene(children=one+'\n'+two),scene(children=two),'node:One'))),['.','One','Two'])
 
 
+    def test_preexisting_missing_reference_does_not_block_unrelated_apply(self):
+        # One side of a conflicted file can reference resources it does not define.
+        broken='mesh = SubResource("ArrayMesh_003ka")\nx = 1'
+        text,warnings,_=merge_selection([None,scene(broken),scene(broken.replace('x = 1','x = 2'))],2,'node:.','x','scene.tscn')
+        self.assertIn('x = 2',text)
+        self.assertIn('SubResource("ArrayMesh_003ka")',text)
+        self.assertTrue(any('already referenced 1 undefined resource' in w for w in warnings))
+
+    def test_missing_dependency_inside_resource_does_not_crash(self):
+        res='[sub_resource type="ArrayMesh" id="M"]\nmaterial = SubResource("Gone")\n'
+        text=apply(scene('x = 1',resources=res),scene('x = 2',resources=res),prop='x',source=2)
+        self.assertIn('x = 2',text)
+
+    def test_newly_missing_reference_is_still_refused(self):
+        res='[sub_resource type="ArrayMesh" id="M"]\n'
+        a=scene('mesh = SubResource("M")',resources=res)
+        b=scene('mesh = SubResource("M")')
+        with self.assertRaisesRegex(ValueError,'missing SubResource'):
+            apply(a,b,resource_key(a,b),source=2)
+
 if __name__=='__main__':
     unittest.main()

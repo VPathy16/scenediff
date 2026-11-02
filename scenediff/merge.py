@@ -94,6 +94,11 @@ class SceneMerge:
             by_line = {s.line: s for s in doc.sections} if doc else {}
             self.by_key.append({k: by_line[e['line']] for k, e in entities.items() if e['line'] is not None})
         self.target_resource_keys = {logical: ref for ref, logical in self.maps[self.target_index].items()}
+        # References that were already broken in the target (e.g. one side of a conflicted
+        # file) are reported, not treated as damage caused by this apply.
+        defined = _resources(self.original)
+        self.already_missing = {ref for s in self.original.sections for v in _values(s)
+                                for ref in references(v) if ref not in defined}
 
     def _replace(self, old, new):
         index = next(i for i, s in enumerate(self.result.sections) if s is old)
@@ -321,11 +326,16 @@ class SceneMerge:
     def _validate_and_order(self):
         sections = self.result.sections
         resources = _resources(self.result)
-        for section in sections:
-            for value in _values(section):
-                for ref in references(value):
-                    if ref not in resources:
-                        raise ValueError(f"Merge would leave a missing {ref[0]}({ref[1]!r}) definition. Update its references before removing a resource.")
+        missing = {ref for section in sections for value in _values(section) for ref in references(value)
+                   if ref not in resources}
+        for ref in sorted(missing - self.already_missing):
+            raise ValueError(f"Merge would leave a missing {ref[0]}({ref[1]!r}) definition. Update its references before removing a resource.")
+        if missing:
+            names = ", ".join(f"{kind}({identity!r})" for kind, identity in sorted(missing)[:5])
+            more = f" and {len(missing) - 5} more" if len(missing) > 5 else ""
+            self.warnings.append(f"The target already referenced {len(missing)} undefined resource{'s' if len(missing) != 1 else ''} "
+                                 f"before this apply ({names}{more}). They were left as they were; "
+                                 "Godot will not load them until they are defined or their references are changed.")
         nodes = {node_path(s): s for s in sections if s.kind == 'node'}
         if len(nodes) != sum(s.kind == 'node' for s in sections):
             raise ValueError("Merge would create duplicate node paths.")
@@ -361,7 +371,8 @@ class SceneMerge:
             section = resources[ref]
             for value in _values(section):
                 for dep in references(value):
-                    visit(dep)
+                    if dep in resources:
+                        visit(dep)
             visiting.remove(ref)
             visited.add(ref)
             ordered.append(section)
