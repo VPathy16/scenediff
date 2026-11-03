@@ -99,7 +99,9 @@ class MergeTests(unittest.TestCase):
         outer=references(nodes(result)['.'].props['data'])[0][1]
         inner=references(resources[outer].props['child'])[0][1]
         self.assertEqual(resources[inner].props['x'],'2')
-        self.assertEqual(resources['i'].props['x'],'1')
+        # The old graph is unused after the apply: it is dropped, and the copy keeps the original IDs.
+        self.assertEqual(sorted(resources),['i','o'])
+        self.assertEqual((outer,inner),('o','i'))
 
     def test_equal_resource_graph_reuses_regenerated_id(self):
         a=scene('data = SubResource("old")',resources='[sub_resource type="Resource" id="old"]\nx = 1')
@@ -113,7 +115,10 @@ class MergeTests(unittest.TestCase):
         b=scene('script = ExtResource("1")',resources='[ext_resource type="Script" path="res://b.gd" id="1"]')
         result,warnings,_=merge_selection([None,a,b],1,'node:.',ALL_PROPERTIES)
         self.assertEqual(nodes(result)['.'].props['text'],'"ExtResource(\\"1\\")"')
-        self.assertNotEqual(nodes(result)['.'].props['script'],'ExtResource("1")')
+        script=references(nodes(result)['.'].props['script'])[0]
+        declared={unquote(s.attrs['id']):s for s in parse(result).sections if s.kind=='ext_resource'}
+        self.assertEqual(unquote(declared[script[1]].attrs['path']),'res://a.gd')
+        self.assertNotIn('res://b.gd',result)
         self.assertTrue(any('res://a.gd' in w for w in warnings))
 
     def test_remove_used_resource_fails(self):
@@ -170,7 +175,8 @@ class MergeTests(unittest.TestCase):
         b=a.replace('x = 2','x = 1')
         result=apply(a,b,prop='data')
         resources=[s for s in parse(result).sections if s.kind=='sub_resource']
-        self.assertEqual([s.attrs['id'] for s in resources],['1','2'])
+        self.assertEqual([s.attrs['id'] for s in resources],['2'])
+        self.assertEqual(resources[0].props['x'],'2')
         self.assertEqual(references(nodes(result)['.'].props['data']),[('SubResource','2')])
 
     def test_malformed_unknown_mismatched_and_invalid_requests(self):
@@ -197,7 +203,8 @@ class MergeTests(unittest.TestCase):
         first,_,history=merge_selection([None,a,b],1,'node:.','first')
         second,_,_=merge_selection([None,a,first],1,'node:.','second',imports=history)
         self.assertEqual(nodes(second)['.'].props['first'],nodes(second)['.'].props['second'])
-        self.assertEqual(sum(s.kind=='sub_resource' for s in parse(second).sections),2)
+        # The target's old definition is no longer used by anything, so it is dropped.
+        self.assertEqual(sum(s.kind=='sub_resource' for s in parse(second).sections),1)
         # Cached mappings are hints: an edited definition must be copied again.
         modified=first.replace('x = 2','x = 3')
         second,_,_=merge_selection([None,a,modified],1,'node:.','second',imports=history)

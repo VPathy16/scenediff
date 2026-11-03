@@ -47,11 +47,37 @@ def _serialize(doc, original):
         end = original.sections[i + 1].line - 1 if i + 1 < len(original.sections) else len(lines)
         raw[id(section)] = "".join(lines[section.line - 1:end])
     # Match by object identity: untouched sections remain the original objects.
+    # Rewritten sections use the file's own line ending (Windows files keep CRLF).
+    newline = "\r\n" if "\r\n" in original.source else "\n"
     chunks = ["".join(lines[:original.sections[0].line - 1])]
-    for section in doc.sections:
-        text = raw.get(id(section), _render_section(section))
-        chunks.append(text if text.endswith("\n") else text + "\n")
+    for i, section in enumerate(doc.sections):
+        text = raw.get(id(section))
+        if text is None:
+            text = _render_section(section).replace("\n", newline)
+        if not text.endswith("\n"):
+            text += newline
+        # Keep a blank line between sections, as Godot writes them.
+        if i + 1 < len(doc.sections) and not text.endswith(newline * 2):
+            text += newline
+        elif i + 1 == len(doc.sections) and id(section) not in raw:
+            text = text.rstrip("\r\n") + newline
+        chunks.append(text)
     return "".join(chunks)
+
+
+def _reachable(sections):
+    """Resources used by nodes or the [resource] section, directly or through other resources."""
+    defined = {(RESOURCE_KINDS[s.kind], unquote(s.attrs['id'])): s for s in sections if s.kind in RESOURCE_KINDS}
+    pending = [ref for s in sections if s.kind not in RESOURCE_KINDS for v in _values(s) for ref in references(v)]
+    seen = set()
+    while pending:
+        ref = pending.pop()
+        if ref in seen:
+            continue
+        seen.add(ref)
+        if ref in defined:
+            pending.extend(r for v in _values(defined[ref]) for r in references(v))
+    return seen
 
 
 def _structure_problems(sections):
@@ -131,6 +157,7 @@ class SceneMerge:
         self.prior_imports = {(kind, identity): target for kind, identity, target in (imports or [])
                               if (kind, identity) in self.source_resources}
         self.imported = {}
+        self.created = set()  # Resources this apply copied in (as opposed to reused).
         self.importing = set()
         self.warnings = []
         self.by_key = []
@@ -141,6 +168,7 @@ class SceneMerge:
         # References that were already broken in the target (e.g. one side of a conflicted
         # file) are reported, not treated as damage caused by this apply.
         defined = _resources(self.original)
+        self.used_before = _reachable(self.original.sections)
         self.already_missing = {ref for s in self.original.sections for v in _values(s)
                                 for ref in references(v) if ref not in defined}
         self.already_broken = _structure_problems(self.original.sections)
@@ -215,6 +243,7 @@ class SceneMerge:
             identity = str(n) if self.original.sections[0].attrs.get('format') == '2' else f'{ref[1]}_merge{n}'
             n += 1
         self.imported[ref] = identity
+        self.created.add((ref[0], identity))
         self.importing.add(ref)
         section = copy.deepcopy(source)
         section.attrs['id'] = self._identity(identity)
@@ -489,6 +518,7 @@ class SceneMerge:
                     self.result.sections.append(updated)
                 else:
                     self._replace(target, updated)
+        self._prune_unused()
         self._validate_and_order()
         text = _serialize(self.result, self.original)
         if len(text.encode('utf-8')) > MAX_FILE:
@@ -498,6 +528,44 @@ class SceneMerge:
         maps, _ = resource_maps([check])
         model(check, maps[0])
         return text, list(dict.fromkeys(self.warnings))
+
+    def _prune_unused(self):
+        """Drop embedded resources this apply left unused, and undo needless ID renames."""
+        used = _reachable(self.result.sections)
+        dropped = [s for s in self.result.sections if s.kind in RESOURCE_KINDS
+                   and (RESOURCE_KINDS[s.kind], unquote(s.attrs['id'])) not in used
+                   and (RESOURCE_KINDS[s.kind], unquote(s.attrs['id'])) in self.used_before]
+        if dropped:
+            self.result.sections = [s for s in self.result.sections if s not in dropped]
+        if self.original.sections[0].attrs.get('format') == '2':
+            return  # Numeric IDs: nothing to restore.
+        taken = set(_resources(self.result))
+        for ref, identity in list(self.imported.items()):
+            if (identity != ref[1] and (ref[0], identity) in self.created
+                    and (ref[0], ref[1]) not in taken and (ref[0], identity) in taken):
+                self._rename(ref[0], identity, ref[1])
+                taken.discard((ref[0], identity)); taken.add((ref[0], ref[1]))
+                self.imported[ref] = ref[1]
+
+    def _rename(self, kind, old, new):
+        def swap(value):
+            matches = list(TOKEN.finditer(value))
+            edits = [(m[2].start(), m[2].end()) for m in zip(matches, matches[1:], matches[2:], matches[3:])
+                     if m[0].group() == kind and m[1].group() == '(' and m[3].group() == ')' and unquote(m[2].group()) == old]
+            for start, end in reversed(edits):
+                value = value[:start] + self._identity(new) + value[end:]
+            return value
+        for i, section in enumerate(self.result.sections):
+            is_definition = section.kind in RESOURCE_KINDS and RESOURCE_KINDS[section.kind] == kind and unquote(section.attrs['id']) == old
+            values = [*section.attrs.values(), *section.props.values()]
+            if not is_definition and not any((kind, old) in references(v) for v in values):
+                continue
+            updated = copy.deepcopy(section)
+            updated.attrs = {k: swap(v) for k, v in updated.attrs.items()}
+            updated.props = {k: swap(v) for k, v in updated.props.items()}
+            if is_definition:
+                updated.attrs['id'] = self._identity(new)
+            self.result.sections[i] = updated
 
     def _seed_resource(self, source, target):
         if source and target and source.kind in RESOURCE_KINDS:

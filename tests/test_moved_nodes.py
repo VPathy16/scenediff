@@ -104,5 +104,56 @@ class MovedNodeTests(unittest.TestCase):
         self.assertFalse(any(s["ambiguous"] for s in suggestions))
         self.assertTrue(all(any(r.startswith("Name kept within the new name") for r in s["reasons"]) for s in suggestions))
 
+
+ICON_SCENE = """[gd_scene load_steps=6 format=3]
+
+[ext_resource type="Shader" path="res://avm_icon.gdshader" id="2_sh"]
+
+[sub_resource type="CompressedTexture2D" id="CompressedTexture2D_aa111"]
+load_path = "res://front.ctex"
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_2xk3p"]
+shader = ExtResource("2_sh")
+shader_parameter/icon = SubResource("CompressedTexture2D_aa111")
+
+[sub_resource type="ArrayMesh" id="ArrayMesh_2nc2f"]
+
+[node name="root" type="Control"]
+
+[node name="front_icon" type="MeshInstance2D" parent="."]
+material = SubResource("ShaderMaterial_2xk3p")
+mesh = SubResource("ArrayMesh_2nc2f")
+"""
+EMPTY_SCENE = '[gd_scene format=3]\n\n[node name="root" type="Control"]\n'
+
+
+class NodeResourceTests(unittest.TestCase):
+    def test_resources_record_the_nodes_that_use_them(self):
+        entities = compare_file("s.tscn", None, ICON_SCENE, EMPTY_SCENE, three_way=False)["entities"]
+        owners = {e["label"]: e["owners"][1] for e in entities if e["kind"] in ("ext_resource", "sub_resource")}
+        self.assertEqual(owners, {"res://avm_icon.gdshader": ["front_icon"],  # through its material
+                                  "CompressedTexture2D · CompressedTexture2D_aa111": ["front_icon"],
+                                  "ShaderMaterial · ShaderMaterial_2xk3p": ["front_icon"],
+                                  "ArrayMesh · ArrayMesh_2nc2f": ["front_icon"]})
+
+    def test_node_brings_its_resources_and_replaced_ones_are_dropped(self):
+        text, _, _ = merge_selection([None, ICON_SCENE, EMPTY_SCENE], 1, "node:front_icon", None, "s.tscn")
+        kinds = sorted(s.kind for s in parse(text).sections if s.kind.endswith("resource"))
+        self.assertEqual(kinds, ["ext_resource", "sub_resource", "sub_resource", "sub_resource"])
+        # Replacing it again with a recoloured version leaves no unused material behind and keeps the IDs.
+        recoloured = ICON_SCENE.replace('load_path = "res://front.ctex"', 'load_path = "res://front2.ctex"')
+        again, _, _ = merge_selection([None, recoloured, text], 1, "node:front_icon", None, "s.tscn", confirm=True)
+        subs = [s for s in parse(again).sections if s.kind == "sub_resource"]
+        self.assertEqual(sorted(s.attrs["id"] for s in subs),
+                         ['"ArrayMesh_2nc2f"', '"CompressedTexture2D_aa111"', '"ShaderMaterial_2xk3p"'])
+        self.assertIn("front2.ctex", again)
+        self.assertNotIn('"res://front.ctex"', again)
+
+    def test_windows_line_endings_are_kept(self):
+        crlf = EMPTY_SCENE.replace("\n", "\r\n")
+        text, _, _ = merge_selection([None, ICON_SCENE, crlf], 1, "node:front_icon", None, "s.tscn")
+        self.assertNotIn("\n", text.replace("\r\n", ""))
+        self.assertTrue(text.endswith('")\r\n'))
+
 if __name__ == "__main__":
     unittest.main()

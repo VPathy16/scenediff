@@ -64,6 +64,26 @@
     $("status-filter").innerHTML = filters.map(([key,label]) => `<button type="button" data-filter="${key}" class="${statusFilter === key ? "active" : ""}" aria-pressed="${statusFilter === key}">${key === "all" ? "" : `<i class="dot ${key}"></i>`}${label}<small>${count(key)}</small></button>`).join("");
     $("status-filter").querySelectorAll("[data-filter]").forEach(button => button.onclick = () => { statusFilter = button.dataset.filter; selectedProperty = null; render(); });
   }
+  // Map resource key -> key of the node it belongs to: its only user, or the nearest node
+  // all its users are inside. Resources shared across the scene stay under RESOURCES.
+  function resourceHomes(entities) {
+    const nodes = new Set(entities.filter(e => e.kind === "node").map(e => e.key));
+    const homes = new Map();
+    for (const e of entities) {
+      if (!["sub_resource","ext_resource"].includes(e.kind)) continue;
+      const owners = [...new Set((e.owners || []).flat())];
+      if (!owners.length || owners.includes("resource")) continue;
+      let home = owners[0];
+      for (const other of owners.slice(1)) {
+        const a = home === "." ? [] : home.split("/"), b = other === "." ? [] : other.split("/");
+        let n = 0; while (n < a.length && n < b.length && a[n] === b[n]) n++;
+        home = n ? a.slice(0, n).join("/") : ".";
+      }
+      if (home === "." && owners.length > 1) continue;
+      if (nodes.has("node:" + home)) homes.set(e.key, "node:" + home);
+    }
+    return homes;
+  }
   function renderSidebar() {
     renderFilter();
     $("file-count").textContent = data.files.length;
@@ -77,26 +97,39 @@
     $("file-list").querySelectorAll("[data-file]").forEach(button => button.onclick = () => selectFile(Number(button.dataset.file)));
     const entities = file()?.entities || [];
     $("entity-count").textContent = entities.filter(e => e.kind === "node").length;
+    // Textures, shaders, materials and meshes are listed under the node that uses them.
+    const homes = resourceHomes(entities);
+    const nested = new Map();
+    for (const [key, home] of homes) (nested.get(home) || nested.set(home, []).get(home)).push(entities.find(e => e.key === key));
     const groups = [
       ["", entities.filter(e => e.kind === "node")],
-      ["RESOURCES", entities.filter(e => ["sub_resource","ext_resource","resource"].includes(e.kind))],
+      ["RESOURCES", entities.filter(e => ["sub_resource","ext_resource","resource"].includes(e.kind) && !homes.has(e.key))],
       ["STRUCTURE & SIGNALS", entities.filter(e => !["node","sub_resource","ext_resource","resource"].includes(e.kind))]
     ];
+    const row = (e, indent, visible, extra = "") => {
+      const name = e.kind === "node" ? e.label.split("/").pop() : e.label;
+      return `<button class="tree-row ${extra} ${e.key === entityKey ? "active" : ""} ${visible ? "" : "context"}" data-entity="${escape(e.key)}" style="padding-left:${10+indent}px" title="${escape(e.label)}" aria-pressed="${e.key === entityKey}"><span class="tree-icon">${e.kind === "node" ? "◇" : e.kind === "connection" ? "ϟ" : "▧"}</span><span class="tree-name">${escape(name)}</span><i class="dot ${changedLabel(e)}" aria-label="${escape(labels[e.status])}"></i></button>`;
+    };
     $("scene-tree").innerHTML = groups.map(([title,items]) => {
+      const shownNested = title ? [] : [...nested.values()].flat().filter(visibleEntity);
       const shown = items.filter(visibleEntity);
-      if (!shown.length) return "";
+      if (!shown.length && !shownNested.length) return "";
       const context = new Set();
-      if (statusFilter !== "all" && !title) for (const e of shown) {
-        const parts = e.path === "." ? [] : e.path.split("/");
+      const addContext = path => {
+        const parts = path === "." ? [] : path.split("/");
         context.add(".");
-        for (let i = 1; i < parts.length; i++) context.add(parts.slice(0, i).join("/"));
+        for (let i = 1; i <= parts.length; i++) context.add(parts.slice(0, i).join("/"));
+      };
+      if (!title) {
+        if (statusFilter !== "all") for (const e of shown) addContext(e.path === "." ? "." : e.path.split("/").slice(0, -1).join("/") || ".");
+        for (const r of shownNested) { const home = entities.find(e => e.key === homes.get(r.key)); if (home) addContext(home.path); }
       }
       const visible = new Set(shown);
       items = items.filter(e => visible.has(e) || (e.kind === "node" && context.has(e.path)));
       return (title ? `<div class="tree-group">${title}</div>` : "") + items.map(e => {
         const indent = e.kind === "node" && e.path !== "." ? Math.min(e.path.split("/").length, 5)*13 : 0;
-        const name = e.kind === "node" ? e.label.split("/").pop() : e.label;
-        return `<button class="tree-row ${e.key === entityKey ? "active" : ""} ${visible.has(e) ? "" : "context"}" data-entity="${escape(e.key)}" style="padding-left:${10+indent}px" title="${escape(e.label)}" aria-pressed="${e.key === entityKey}"><span class="tree-icon">${e.kind === "node" ? "◇" : e.kind === "connection" ? "ϟ" : "▧"}</span><span class="tree-name">${escape(name)}</span><i class="dot ${changedLabel(e)}" aria-label="${escape(labels[e.status])}"></i></button>`;
+        const children = (nested.get(e.key) || []).filter(visibleEntity);
+        return row(e, indent, visible.has(e)) + children.map(r => row(r, indent + 22, true, "nested")).join("");
       }).join("");
     }).join("") || `<p class="small muted" style="padding:10px">${entities.length ? "No entities match this filter." : "Open a scene or resource to explore its structure."}</p>`;
     $("scene-tree").querySelectorAll("[data-entity]").forEach(button => button.onclick = () => selectEntity(button.dataset.entity));
@@ -245,6 +278,14 @@
     if (e?.used_by.some(users => users.length)) impact += `<div class="impact-item"><b>RESOURCE REFERENCES</b>${e.used_by.map((users,i) => users.length ? `<p><b>${["Base","A","B"][i]}</b>${users.map(u => `<code>${escape(u)}</code>`).join("<br>")}</p>` : "").join("")}</div>`;
     if (f.referenced_by?.length) impact += `<div class="impact-item"><b>REFERENCED BY · BRANCH B</b>${f.referenced_by.map(p => `<code>${escape(p)}</code>`).join("<br>")}</div>`;
     if (!e?.used_by.some(users => users.length) && !f.referenced_by?.length) impact += '<p class="small muted">Inspect the serialized properties and raw source to understand the scope of this change.</p>';
+    const homes = resourceHomes(f.entities);
+    if (e?.kind === "node") {
+      const own = f.entities.filter(r => homes.get(r.key) === e.key);
+      if (own.length) impact += `<div class="impact-item"><b>COMES WITH THIS NODE</b>${own.map(r => `<div>${escape(r.label)} ${badge(changedLabel(r))}</div>`).join("")}<span class="muted">Applying the whole node copies these too.</span></div>`;
+    } else if (e && homes.has(e.key)) {
+      const home = f.entities.find(n => n.key === homes.get(e.key));
+      if (home) impact += `<div class="impact-item"><b>BELONGS TO NODE</b><code>${escape(home.label)}</code><br><span class="muted">It is copied when that node is applied.</span></div>`;
+    }
     $("impact").innerHTML = impact;
     const warnings = [...f.warnings,...(f.merge_warnings || []),...(e?.notes || [])];
     if (data.context.merge_preview && data.context.source === "git") warnings.push("Git commit IDs identify the original snapshots. Validate merged files and their dependencies in your target project.");
@@ -306,7 +347,7 @@
       html = `<div class="resolution-card"><h3>Apply changes to a scene</h3><p>Start with the target version and copy only what you select. Download the result when you are ready.</p>`;
       if (row) html += `<div class="merge-scope">Selected property: <strong>${escape(row.property.replace(/^@/,""))}</strong></div><div class="merge-actions">${buttons("property")}</div>`;
       if (canAll) html += `<div class="merge-scope">All properties of this node</div><div class="merge-actions">${buttons("all")}</div><p>Copies every property of this node and keeps its children, name and place in the scene.${isRoot ? " To bring over child nodes, select them in the outline." : ""}</p>`;
-      if (canEntity) html += `<div class="merge-scope">${e.kind === "node" ? "Whole node and children" : "Whole " + escape(kindLabels[e.kind] || e.kind)}</div><div class="merge-actions">${buttons("entity")}</div><p>${e.kind === "node" ? "Replaces this target subtree, including its signal connections, with the source subtree. An absent source removes the target subtree. You are asked to confirm before anything only the target has is removed." : "Copies the selected item. An absent source removes it when no references remain."}</p>`;
+      if (canEntity) html += `<div class="merge-scope">${e.kind === "node" ? "Whole node and children" : "Whole " + escape(kindLabels[e.kind] || e.kind)}</div><div class="merge-actions">${buttons("entity")}</div><p>${e.kind === "node" ? "Replaces this target subtree, including its signal connections, with the source subtree. Its textures, shaders, materials and meshes come with it. An absent source removes the target subtree. You are asked to confirm before anything only the target has is removed." : "Copies the selected item. An absent source removes it when no references remain."}</p>`;
       if (["sub_resource","ext_resource"].includes(e.kind)) html += '<p>Editing this resource affects every node that references it in the target.</p>';
       html += '</div>';
     } else if (supported && !boot.live) {

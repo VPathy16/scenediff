@@ -51,6 +51,32 @@ def _usage(doc: Document | None, node_paths=None) -> dict[str, set[str]]:
     return usage
 
 
+def _owners(doc: Document | None, node_paths=None) -> dict[tuple[str, str], set[str]]:
+    """Node paths that use each resource, directly or through other embedded resources."""
+    owners = defaultdict(set)
+    if not doc:
+        return owners
+    subs = _resources(doc, "sub_resource")
+
+    def visit(value, owner, seen):
+        for ref in references(value):
+            if ref in seen:
+                continue
+            owners[ref].add(owner)
+            if ref[0] == "SubResource" and ref[1] in subs and len(seen) < 32:
+                for child in [*subs[ref[1]].attrs.values(), *subs[ref[1]].props.values()]:
+                    visit(child, owner, seen | {ref})
+
+    for section in doc.sections:
+        if section.kind in {"node", "resource"}:
+            owner = node_path(section) if section.kind == "node" else "resource"
+            if section.kind == "node" and node_paths:
+                owner = node_paths.get(owner, owner)
+            for value in [*section.attrs.values(), *section.props.values()]:
+                visit(value, owner, frozenset())
+    return owners
+
+
 def resource_maps(docs: list[Document | None], node_maps=None):
     maps: list[dict[tuple[str, str], str]] = []
     known = {"ExtResource": [], "SubResource": []}
@@ -98,6 +124,7 @@ def model(doc: Document | None, mapping: dict, node_paths=None) -> dict:
         return entities
     node_paths = node_paths or {}
     root_name = next((unquote(s.attrs.get("name", '"Scene"')) for s in doc.sections if s.kind == "node" and "parent" not in s.attrs), "Scene")
+    owners = _owners(doc, node_paths)
     orders = defaultdict(list)
     usage = _usage(doc)
     for index, section in enumerate(doc.sections):
@@ -143,7 +170,9 @@ def model(doc: Document | None, mapping: dict, node_paths=None) -> dict:
             raise ParseError(f"Line {section.line}: duplicate scene entity {label}")
         props = {"@" + k: v for k, v in attrs.items()}
         props.update(section.props)
-        entities[key] = {"key": key, "kind": kind, "label": label, "path": path,
+        owned = (sorted(owners.get(("ExtResource" if kind == "ext_resource" else "SubResource", unquote(section.attrs.get("id", '""'))), ()))
+                 if kind in {"ext_resource", "sub_resource"} else [])
+        entities[key] = {"key": key, "kind": kind, "label": label, "path": path, "owners": owned,
                          "line": section.line, "properties": props,
                          "canonical": {k: canonical(v, mapping) for k, v in props.items()},
                          "used_by": users}
@@ -224,6 +253,7 @@ def compare_scene(base: str | None, left: str | None, right: str | None, *, thre
         entities.append({k: representative[k] for k in ("key", "kind", "label", "path")} | {
             "status": overall, "exists": exists, "rows": rows,
             "used_by": [v["used_by"] if v else [] for v in versions],
+            "owners": [v.get("owners", []) if v else [] for v in versions],
             "lines": [v["line"] if v else None for v in versions],
             "paths": [v["path"] if v else None for v in versions],
             "structural_conflict": "delete/edit" if existence_conflict else "add/add" if addition_conflict else None,
